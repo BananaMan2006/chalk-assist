@@ -41,9 +41,10 @@ assert(matchEvent and fxEvent and matchEvent:IsA("RemoteEvent") and fxEvent:IsA(
     "Chalk It Up Match/Fx events were not found")
 
 local api = {}
+local loadedGameId,loadedPlaceId,loadedJobId=game.GameId,game.PlaceId,game.JobId
 env.ChalkDB = api
 local alive, enabled = true, true
-local assist,autoplay,repeatWR,idleGuard,fullplay,matchSkip
+local assist,autoplay,repeatWR,idleGuard,fullplay,matchSkip,autoload
 local alertSettingsFile="ciu_match_alert_settings.json"
 local alertSettings={enabled=not (previousState and previousState.matchAlerts
     and previousState.matchAlerts.enabled==false)}
@@ -145,7 +146,7 @@ local function auditMatch(kind,data)
             end
         end
         appendfile("ciu_match_audit.jsonl",game:GetService("HttpService"):JSONEncode({
-            kind=kind,version="2.41",time=workspace:GetServerTimeNow(),jobId=game.JobId,
+            kind=kind,version="2.42",time=workspace:GetServerTimeNow(),jobId=game.JobId,
             selectedQueue=state and state.selectedMode,phase=phase,role=role,
             fullAuto=fullAutoState,
             fields=fields,rankAttributes=observedRank()})..string.char(10))
@@ -947,6 +948,7 @@ end
 function api.unload(preserveAutoplay)
     if not alive then return end
     cancelDrag()
+    if autoload then autoload.unload(preserveAutoplay) end
     if matchSkip then
         if matchSkipEditing then api.setMatchSkipUsername(matchSkipBox.Text) end
         matchSkip.unload()
@@ -977,12 +979,13 @@ end
 function api.status()
     local ch = characterOf(opponent)
     local holder,isEnemy,holderRole=carrierContext()
-    return {version="2.41", enabled=enabled, role=role or "unknown",rawRole=rawRole or "unknown", phase=phase,
+    return {version="2.42", enabled=enabled, role=role or "unknown",rawRole=rawRole or "unknown", phase=phase,
         ui={visible=windowVisible,minimized=minimized,x=panel.Position.X.Offset,y=panel.Position.Y.Offset},
         matchAlerts={enabled=alertSettings.enabled,saveError=alertSettings.saveError},
         idleGuard=idleGuard and idleGuard.status() or nil,
         fullplay=fullplay and fullplay.status() or nil,
         matchSkip=matchSkip and matchSkip.status() or nil,
+        autoload=autoload and autoload.status() or nil,
         matchIdentityVerified=matchIdentityVerified,
         mode=mode or "1v1",modeSource=modeSource, opponent=ch and ch.Name or "unknown",
         team=localTeam,offense=offense,teamGeometry=validGeo(teamGeo),
@@ -998,6 +1001,7 @@ function api.context()
     return {role=role,phase=phase,mode=mode,modeSource=modeSource,arc=arc,launchAt=launchAt,
         route=route,snapAt=snapAt,passType=passType,preSnapEnds=preSnapEnds,
         catchIntent=fullplay and fullplay.catchIntent and fullplay.catchIntent() or nil,
+        playBudget=fullplay and fullplay.movementBudget and fullplay.movementBudget() or nil,
         passStarted=passStarted,
         enabled=enabled,testing=testing,alive=alive,offset=offset,
         matchIdentityVerified=matchIdentityVerified,
@@ -1005,7 +1009,7 @@ function api.context()
         team=localTeam,rawRole=rawRole,roster=roster,offense=offense,LOS=currentLOS,
         carrier=holder,enemyCarrier=isEnemy,defending=isEnemy,carrierRole=holderRole,
         teamMode=mode=="Team" and teamGeo and teamGeo.Mode or nil,
-        gameId=game.GameId,placeId=game.PlaceId,jobId=game.JobId}
+        gameId=loadedGameId,placeId=loadedPlaceId,jobId=loadedJobId}
 end
 function api.syncFromGame()
     if testing then return api.status() end
@@ -1274,4 +1278,4 @@ if type(writefile)=="function" then
         end
     end)
 end
-print("Chalk Assist 2.41 loaded. Full Auto preserves defensive stamina and varies legal routes. Idle protection runs automatically. Drag / minimize / Right Shift hide. V assist / B all / F8 unload.")
+print("Chalk Assist 2.42 loaded. Full Auto preserves defensive stamina and varies legal routes. Idle protection runs automatically. Drag / minimize / Right Shift hide. V assist / B all / F8 unload.")

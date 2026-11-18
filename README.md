@@ -1,4 +1,4 @@
-# Chalk Assist 2.41
+# Chalk Assist 2.42
 
 Chalk Assist is available in the public [BananaMan2006/chalk-assist repository](https://github.com/BananaMan2006/chalk-assist). The ready-to-run file is `chalk-it-up-1v1.lua`. This repository contains the assist's own source and tests; it does not include copied Roblox game scripts, account settings, recordings, or credentials.
 
@@ -8,7 +8,9 @@ Join Chalk It Up, attach your executor, and run this to load the public reposito
 loadstring(game:HttpGet("https://raw.githubusercontent.com/BananaMan2006/chalk-assist/main/chalk-it-up-1v1.lua"))()
 ```
 
-No GitHub account or token is needed to download public files. Your executor must support HTTP requests and `loadstring`.
+No GitHub account or token is needed to download public files. Your executor must support HTTP requests and `loadstring`. After loading, Chalk Assist automatically queues itself for the next teleport when the executor provides `queue_on_teleport`, `queueonteleport`, or `syn.queue_on_teleport`. This works without an account-specific username or local computer path. The queued startup waits for game dependencies and can use a previously successful download or installed local copy if the public download is unavailable.
+
+A script cannot attach an executor to Roblox itself. For a fresh Roblox launch, enable your executor’s own auto-attach/autoexec feature and install the loader using the steps below. Executors without a teleport queue need autoexec on every join. Automatic loading is limited to the verified Chalk It Up place. F8 keeps it unloaded in the current server; a later join may load it again.
 
 For a local installation, open the repository, choose **Code → Download ZIP**, and extract it. Alternatively, clone it with Git:
 
@@ -43,22 +45,24 @@ The optional autoexec loader loads that local copy when you join the verified Ch
 
 The on-screen window can be dragged and minimized. Right Shift hides or shows it. **B** toggles the assist, **V** toggles catch assistance, and **F8** unloads it. Full Auto handles the supported 1v1 route and movement decisions; catch assistance also handles team contexts. Autoplay lets you select the supported game mode and queue again after a completed match. Movement uses the game's normal walk and sprint settings, currently 20 and 27, rather than setting an extra movement speed. For desktop alerts on macOS, extract `macos-match-alerts-source.zip` and follow [MACOS_ALERTS.md](MACOS_ALERTS.md). Its portable source and 21 passing self-tests are included. The in-game loader does not install or start that separate desktop helper. Other operating systems need their own desktop notifier.
 
-Full Auto now favors varied routes that begin through the middle, then cut left or right toward a deep end-zone finish. Catch movement uses a checked detour or paced arrival when it can preserve the contact window, so a reachable timed approach does not park early. A clear diving goal catch may take priority over a shorter upright catch on these submitted deep routes; ordinary receiving keeps its upright-first behavior. DB coverage normally stays slightly shallower than the receiver, conserving sprint, and adjusts deeper after observed deep-floater catches against that opponent. These are local movement and reach estimates, not guaranteed catches or wins.
+Full Auto WR now walks the middle stem to preserve stamina, then commits to a continuous native-speed sprint through the final left/right cut and planned diving finish. The new routes aim at the closest legal sideline edge (the game clamps the route one stud inside the boundary), with varied cut timings and a deep end-zone target. Route selection checks the actual slower launch position, the full sprint duration, remaining stamina, and native dive travel before accepting a sideline plan. These submitted Full Auto routes request a real dive before contact; ordinary manual receiving retains its upright-first behavior. When a jam, low stamina, or field layout prevents this route family, the status reports a fallback instead of claiming a guaranteed sideline finish.
+
+DB starts with a loose 3–5 yard cushion, tracks small changes less aggressively, and uses short sprint bursts. Prethrow defense usually keeps at least 70 stamina, or 60 when recovery is urgent. Ball pursuit keeps a 40-point reserve; WR final pursuit keeps 10, with a small input-delay allowance. Coverage tightens near the goal and still adjusts deeper against opponents who repeatedly win with deep floaters. All movement uses native game speed. These are local movement and reach estimates, not guaranteed catches or wins.
 
 The **Auto-leave usernames (separate with commas)** field accepts multiple exact Roblox account usernames, for example `@stupieddaniel, @AnotherPlayer, @ThirdPlayer`. Commas, semicolons, spaces, and pasted line breaks work as separators; `@` is optional and duplicates are removed without regard to capitalization. Press Enter or click outside the field to save the whole list. Invalid entries leave the last valid list unchanged. Clear the field to stop matching anyone. The initial list is `@stupieddaniel` when no saved setting exists; upgrading preserves your previous single username and ON/OFF setting. **AUTO LEAVE ON/OFF** controls this setting independently. Detection uses a verified current opponent, not someone merely present in the lobby, and ignores display-name matches. If any verified opponent matches a name in the list, the script requests a leave and rejoin of the public lobby. The server decides whether that departure counts as a forfeit or awards the other account a win; the script cannot guarantee the result. The toggle and full username list persist across joins on that laptop.
 
-The 2.41 auto-leave feature checks passed **100/100** across match skipping, identity validation, autoplay, and mode handling. The gameplay update also passed **182/182** planner, approach, steering, sprint, and fullplay checks, for **282/282** total offline checks. You can rerun those offline checks with Lupa installed into a temporary dependency folder:
+The 2.42 update adds offline checks for real diving contact, reserve enforcement, portable startup, and route/movement timing. The portable loader passes **33/33** lifecycle tests; planner, motion, approach, steering, and sprint checks pass **113/113**; fullplay passes **107/107**, for **253/253** offline checks. You can run the self-contained checks with Lupa installed into a temporary dependency folder:
 
 ```sh
 python3 -m pip install --target /tmp/chalk-test-deps lupa
-python3 run-chalk-tests.py --deps /tmp/chalk-test-deps --suite match-skip --suite match-skip-identity --suite autoplay --suite mode
+python3 run-chalk-tests.py --deps /tmp/chalk-test-deps --suite autoload --suite planner --suite motion --suite approach --suite fullplay-steering --suite pending-sprint
 ```
 
 Windows PowerShell:
 
 ```powershell
 py -3 -m pip install --target "$env:TEMP\chalk-test-deps" lupa
-py -3 run-chalk-tests.py --deps "$env:TEMP\chalk-test-deps" --suite match-skip --suite match-skip-identity --suite autoplay --suite mode
+py -3 run-chalk-tests.py --deps "$env:TEMP\chalk-test-deps" --suite autoload --suite planner --suite motion --suite approach --suite fullplay-steering --suite pending-sprint
 ```
 
 These tests check local logic, not live Roblox physics, server decisions, successful interceptions, or awarded wins. The optional fullplay suite requires a separately available native RouteMath fixture; that game source is not shipped in this repository. For troubleshooting, inspect the script window's message, the executor console, or `ciu_autoload_status.txt` in the workspace when using autoexec.

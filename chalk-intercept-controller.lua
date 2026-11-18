@@ -110,7 +110,7 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
         fields = fields or {}
         if fields.defenderAt==math.huge or fields.defenderAt==-math.huge then fields.defenderAt=nil end
         fields.kind, fields.time = kind, workspace:GetServerTimeNow()
-        fields.version="2.41"
+        fields.version="2.42"
         fields.launchAt=fields.launchAt or throwKey
         table.insert(history, fields)
         if #history > 80 then table.remove(history, 1) end
@@ -203,6 +203,18 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
         elseif motion.grounded then trackedAirborne=false end
         return motion
     end
+    local function sprintBudget(s)
+        return Motion.sprintBudget(s.role,tonumber(me:GetAttribute("Stamina")),Config.SprintDrain,s.playBudget)
+    end
+    local function enforceSprintReserve(s)
+        local budget=sprintBudget(s)
+        if budget.enforced and not budget.canSprint and me:GetAttribute("SprintOn")==true then
+            Moves.HoldSprint(false)
+            ownsSprint=false
+            trackedSprintRoot,sprintTracking=nil,nil
+        end
+        return budget
+    end
     local function snapshot(s, root, h, now)
         local g = workspace.Gravity
         local turf=s.geo and s.geo.TurfY or Field.TurfY
@@ -215,8 +227,8 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
         local grounded = motion.grounded and reachAirborne~=false
         local reachOverride=reachAirborne
         if motion.physicalAirborne and not motion.nativeAirborne then reachOverride=false end
-        local stamina=math.max(0,tonumber(me:GetAttribute("Stamina")) or 0)
-        local sprintSeconds=math.max(0,(stamina-2)/math.max(1,Config.SprintDrain))
+        local budget=sprintBudget(s)
+        local sprintSeconds=budget.seconds
         local locomotion=locomotionState(root,h,now,sprintSeconds)
         local function inspectOpponent(opponent)
         local otherRoot=opponent and opponent:FindFirstChild("HumanoidRootPart")
@@ -244,7 +256,11 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
             end
         end
         return {now=now, arc=s.arc, launchAt=s.launchAt,role=s.role,
-            continuousApproach=s.role=="WR" and s.catchIntent and s.catchIntent.deepFinish==true,
+            continuousApproach=s.role=="WR" and s.catchIntent and s.catchIntent.deepFinish==true
+                and s.catchIntent.continuousSprint~=true,
+            continuousSprint=s.role=="WR" and s.catchIntent and s.catchIntent.continuousSprint==true,
+            requireDive=s.role=="WR" and s.catchIntent and s.catchIntent.requireDive==true,
+            sprintReserve=budget.reserve,
             preferGoalZ=s.role=="WR" and s.catchIntent and s.catchIntent.deepFinish
                 and s.catchIntent.goalZ+(s.offset and s.offset.Z or 0) or nil,
             defenderDeadline=s.role=="WR" and wrDefenderDeadline or nil,
@@ -345,8 +361,8 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
                 return true,note
             end
         end
-        if strength>0.001 and directive.sprint==true
-            and (tonumber(me:GetAttribute("Stamina")) or 0)>2 then
+        local budget=sprintBudget(s)
+        if strength>0.001 and directive.sprint==true and budget.canSprint then
             ownsSprint=true
             if me:GetAttribute("SprintOn")~=true then Moves.HoldSprint(true) end
         else
@@ -431,6 +447,7 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
             lastPauseReason=nil
         end
         local now = workspace:GetServerTimeNow()
+        enforceSprintReserve(s)
         if s.phase~="Live" or not s.arc or not s.launchAt then
             wrDefenderDeadline=nil
             trackedMotionRoot,trackedAirborne=nil,false
@@ -469,7 +486,7 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
         ownInput()
         local root, h = healthyCharacter()
         if not root then cancel(); message="Waiting for character"; return end
-        local currentLocomotion=locomotionState(root,h,now)
+        local currentLocomotion=locomotionState(root,h,now,sprintBudget(s).seconds)
         local motion=motionState(s,root,h)
         h.Jump=jumpRequest~=nil
         if jumpRequest then
@@ -661,7 +678,8 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
                     defenderAt=plan.defenderAt,
                     defenderDeadline=wrDefenderDeadline,observedDefenderAt=plan.observedDefenderAt,
                     contact=xyz(plan.contactPosition), direction=xyz(plan.direction)})
-                if WRApproach and s.role=="WR" and not wrFakeUsed and not jumpRequest then
+                if WRApproach and s.role=="WR" and not lastSnapshot.continuousSprint and not lastSnapshot.requireDive
+                    and not wrFakeUsed and not jumpRequest then
                     local fake,whyFake=WRApproach.choose(Planner,lastSnapshot,plan)
                     if fake then
                         wrFakeUsed=true;wrFake=fake;fake.started=now
@@ -734,7 +752,7 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
                 atTarget,parkedPosition=true,root.Position
             elseif delta.Magnitude>2.5 then atTarget,parkedPosition=false,nil end
             local moving=not atTarget and (plan.kind=="pursue" or plan.diveAt~=nil or now<plan.stopAt)
-            if moving and (tonumber(me:GetAttribute("Stamina")) or 0)>2
+            if moving and sprintBudget(s).canSprint
                 and me:GetAttribute("SprintOn")~=true then
                 ownsSprint=true
                 Moves.HoldSprint(true)
@@ -778,7 +796,7 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
             end
             if plan.jumpAt and (not jumped or jumpRequest or actionNow-lastJump<0.045
                 or h.FloorMaterial~=Enum.Material.Air) then return end
-            if s.role=="WR" then
+            if s.role=="WR" and not (s.catchIntent and s.catchIntent.requireDive) then
                 local uprightSnapshot=snapshot(s,root,h,actionNow)
                 uprightSnapshot.canDive=false
                 uprightSnapshot.allowLastResort=plan.risk~=nil
@@ -1024,6 +1042,6 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
         touchedConnection:Disconnect()
         cancel()
     end
-    log("loaded",{version="2.41",nativeDive=nativeDive~=nil,nativeGrab=nativeGrabTarget~=nil})
+    log("loaded",{version="2.42",nativeDive=nativeDive~=nil,nativeGrab=nativeGrabTarget~=nil})
     return controller
 end

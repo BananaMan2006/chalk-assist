@@ -165,112 +165,173 @@ local function lateBendTrigger(input)
     return token
 end
 
+local function sidelineDiveWitness(plan,launchPoint,outgoing,los,Config,Field)
+    -- A continuous final run can overshoot a sideline during a full native
+    -- dive even when the simple distance budget passes. Require one ordinary
+    -- grounded-dive witness on the same coarse timing grid used by the live
+    -- planner. This only establishes own geometry, not a defender-free catch.
+    local dive=Config.Moves.Dive
+    local reaction,age,step=.035,.42,.035
+    if (dive.Time or .35)>.408 then return nil end
+    local origin=Vector3.new((Field.MinX+Field.MaxX)*.5,Config.ReleaseHeight,
+        los-Config.QBBackYards*Field.YD)
+    local target=Vector3.new(plan.Target.X,Config.CatchHeight,plan.Target.Y)
+    local position=Vector3.new(launchPoint.X,3,launchPoint.Y)
+    local velocity=Vector3.new(outgoing.X,0,outgoing.Y)*Config.SprintSpeed
+    local upY,upForward=math.cos(math.rad(80)),math.sin(math.rad(80))
+    local radius,reach=Config.DiveCatchRadius or 2.5,Config.DiveReach or 2.4
+    local function ballAt(t)
+        local u=t/plan.Flight
+        return origin:Lerp(target,u)+Vector3.new(0,4*plan.Apex*u*(1-u),0)
+    end
+    local function segmentDistance(point,a,b)
+        local ab=b-a
+        return (point-a-ab*clamp((point-a):Dot(ab)/math.max(1e-8,ab:Dot(ab)),0,1)).Magnitude
+    end
+    for t=.065,plan.Flight+.06,step do
+        if t>=plan.Flight-.1 then
+            local ball=ballAt(t)
+            local flat=(ball-position)*FLAT
+            if flat.Magnitude>1e-5 then
+                local direction=flat.Unit
+                local root=position+velocity*reaction+direction*(Config.SprintSpeed
+                    *math.max(0,t-age-reaction)+dive.Yards*Field.YD)
+                root=Vector3.new(root.X,.6,root.Z)
+                local up=Vector3.new(direction.X*upForward,upY,direction.Z*upForward)
+                local margin=INF
+                for _,dt in ipairs({-.012,0,.012}) do
+                    local at=ballAt(t+dt)
+                    if at.Y<.05 then margin=-INF;break end
+                    margin=math.min(margin,radius-segmentDistance(at,root-up,root+up*reach))
+                end
+                if margin>=.4 and root.X>=Field.MinX+.5 and root.X<=Field.MaxX-.5
+                    and root.Z>=Field.GoalZ and root.Z<=Field.EndZ-.5 then
+                    return {elapsed=t,root=root,margin=margin,diveAge=age}
+                end
+            end
+        end
+    end
+    return nil
+end
+
 local function middleStemRoutes(input,Config,Field,RouteMath,los,stamina,opponent,favored,offset)
     local yd,mid=Field.YD,(Field.MinX+Field.MaxX)*.5
-    local edge=math.max(Config.RouteEdgeMargin or 1,1.5)
+    local edge=math.max(.5,Config.RouteEdgeMargin or 1)
     local setupReach=math.max(0,tonumber(Config.HikeTime) or 0)
         *math.max(0,tonumber(Config.PreSnapDBSpeed) or 0)
     local dive=Config.Moves and Config.Moves.Dive
     local diveDistance=dive and finite(dive.Yards) and math.max(0,dive.Yards*yd) or 0
     local diveTime=dive and finite(dive.Time) and math.max(0,dive.Time) or 0
-    local variants={{name="middle_cut_early",lead=.65,width=6},
-        {name="middle_cut_mid",lead=.4,width=5},{name="middle_cut_late",lead=.28,width=6}}
+    if diveDistance<=0 or diveTime<=0 then return {} end
+    local run,sprint=math.max(1,Config.RunSpeed),math.max(1,Config.SprintSpeed)
+    local drain=math.max(.01,Config.SprintDrain)
+    local dispatch,staminaReserve=.12,10
+    local goalDepth=(Field.GoalZ-los)/yd
     local candidates={}
-    for _,side in ipairs({favored,-favored}) do
-        for _,depth in ipairs({24,25,26,27,28}) do
-            for _,variant in ipairs(variants) do
-                local pass=Config.Pass.Floater
-                local finalLeg=(pass.Flight+variant.lead)*Config.FillSpeed/yd-(pass.Lead or 0)
-                local tail=math.sqrt(math.max(0,finalLeg*finalLeg-variant.width*variant.width))
-                local stem=depth-tail
+    -- The receiver walks the center stem at the native run speed, conserving
+    -- current stamina. No unverified regeneration is credited. The throw still
+    -- follows the unchanged native FillSpeed clock, so these two clocks must
+    -- be modeled separately rather than placing us at PointAt(Launch).
+    for _,insetYards in ipairs({0,1,2,3}) do
+        for _,side in ipairs({favored,-favored}) do
+            for _,goalBeyond in ipairs({-1,0,1,1.5,2}) do
+                local depth=goalDepth+goalBeyond
                 local endZ=los+depth*yd
-                local endX=mid+side*variant.width*yd
-                if stem>=4 and endZ<=Field.EndZ-edge and endX>=Field.MinX+edge
-                    and endX<=Field.MaxX-edge then
-                    local raw={Vector2.new(mid,los),Vector2.new(mid,los+stem*yd),Vector2.new(endX,endZ)}
-                    local points=RouteMath.Sanitize(raw,mid,los)
-                    local plan=RouteMath.Plan(points,"Floater")
-                    if #points==3 and math.abs(points[2].X-mid)<1e-5
-                        and (points[3]-raw[3]).Magnitude<.05 then
-                        local incoming=points[2]-points[1]
-                        local outgoing=points[3]-points[2]
-                        local angle=math.deg(math.acos(clamp(incoming.Unit:Dot(outgoing.Unit),-1,1)))
-                        local cutLead=plan.Launch-plan.Times[2]
-                        local distance=RouteMath.Length(points)+(plan.LeadTime or 0)*Config.FillSpeed
-                        local groundTime=travelTime(distance,Config,stamina)
-                        -- This is a route-selection distance budget, not an action
-                        -- schedule. The live catch planner still validates the
-                        -- actual jump/dive pose, cooldown, slowdown and ball arc.
-                        local fraction=.98
-                        local finishAt=plan.Launch+plan.Flight*fraction
-                        local origin=Vector2.new(mid,los-Config.QBBackYards*yd)
-                        local finish=origin:Lerp(plan.Target,fraction)
-                        -- Middle stems are paced to native waypoint times. Use
-                        -- that actual planned launch pose, not a hypothetical
-                        -- full-sprint run from the snap. The final cut is already
-                        -- complete, so the flight controller can take this direct
-                        -- remaining segment to the intended ball position.
-                        local launchPoint=RouteMath.PointAt(plan,plan.Launch)
-                        local paceReachable=Config.FillSpeed<=Config.RunSpeed
-                            or stamina+1e-6>=plan.Launch*Config.SprintDrain
-                        local launchStamina=math.max(0,stamina-(Config.FillSpeed>Config.RunSpeed
-                            and plan.Launch*Config.SprintDrain or 0))
-                        local finishDistance=(finish-launchPoint).Magnitude
-                        local finishWindow=plan.Flight*fraction
-                        local finishRun=travelTime(finishDistance,Config,launchStamina)
-                        local upright=finishRun+.12<=finishWindow
-                        local diveRun=diveDistance>0 and diveTime>0
-                            and travelTime(math.max(0,finishDistance-diveDistance),Config,launchStamina)+diveTime+.12 or INF
-                        local finishReachable=upright or diveRun<=finishWindow
-                        if angle>=20 and cutLead>=.2 and cutLead<=.85 and paceReachable and finishReachable
-                            and finish.Y>=Field.GoalZ+yd then
-                            local worst,endpointDistance=0,0
-                            if opponent then
-                                worst=INF
-                                local p0=Vector3.new(mid+offset.X,Config.ReleaseHeight,
-                                    los-Config.QBBackYards*yd+offset.Z)
-                                local target=worldPoint(plan.Target,offset,Config.CatchHeight)
-                                endpointDistance=flatDistance(target,opponent)
-                                local height=3+(Config.HandUpOffset or 3.5)
-                                    +(Config.JumpHeight or 6)+(Config.CatchRadius or 3.75)
-                                for sample=1,10 do
-                                    local u=sample/10
-                                    local at=p0:Lerp(target,u)+Vector3.new(0,4*plan.Apex*u*(1-u),0)
-                                    if at.Y<=height then
-                                        local reach=setupReach+Config.SprintSpeed
-                                            *math.max(0,plan.Launch+plan.Flight*u-.15)+(Config.CatchRadius or 3.75)
-                                        worst=math.min(worst,flatDistance(at,opponent)-reach)
+                local endX=side<0 and Field.MinX+edge+insetYards*yd
+                    or Field.MaxX-edge-insetYards*yd
+                for _,tailYards in ipairs({11,11.5,12,12.5,13,13.5,14,14.5}) do
+                    local stem=depth-tailYards
+                    if stem>=4 and depth>=16 and endZ<=Field.EndZ-edge
+                        and math.abs(endX-mid)>=3*yd then
+                        local raw={Vector2.new(mid,los),Vector2.new(mid,los+stem*yd),Vector2.new(endX,endZ)}
+                        local points=RouteMath.Sanitize(raw,mid,los)
+                        if #points==3 and math.abs(points[2].X-mid)<1e-5
+                            and (points[3]-raw[3]).Magnitude<.05 then
+                            local plan=RouteMath.Plan(points,"Floater")
+                            local incoming,outgoing=points[2]-points[1],points[3]-points[2]
+                            local angle=math.deg(math.acos(clamp(incoming.Unit:Dot(outgoing.Unit),-1,1)))
+                            local cutAt=incoming.Magnitude/run
+                            local cutLead=plan.Launch-cutAt
+                            local sprintDuration=plan.Arrival-cutAt+dispatch
+                            local finalStamina=stamina-sprintDuration*drain
+                            local fraction=.98
+                            local finishAt=plan.Launch+plan.Flight*fraction
+                            local origin=Vector2.new(mid,los-Config.QBBackYards*yd)
+                            local finish=origin:Lerp(plan.Target,fraction)
+                            -- Startup slack reduces estimated progress, while the
+                            -- stamina budget charges the earlier ideal cut plus a
+                            -- dispatch allowance after arrival. This is deliberately
+                            -- conservative about both distance and retained stamina.
+                            local sprintBeforeThrow=math.max(0,cutLead-dispatch)
+                            local launchPoint=points[2]+outgoing.Unit*math.min(outgoing.Magnitude,
+                                sprint*sprintBeforeThrow)
+                            local launchStamina=math.max(0,stamina-math.max(0,cutLead)*drain)
+                            local finishDistance=(finish-launchPoint).Magnitude
+                            local finishWindow=plan.Flight*fraction
+                            local diveRun=math.max(0,finishDistance-diveDistance)/sprint+diveTime
+                            local uprightTime=finishDistance/sprint
+                            local finishReachable=diveRun+dispatch<=finishWindow
+                            if angle>=20 and cutLead>=dispatch+.01 and cutLead<=.5
+                                and finalStamina>=staminaReserve and finishReachable
+                                and finish.Y>=Field.GoalZ+yd then
+                                local witness=sidelineDiveWitness(plan,launchPoint,outgoing.Unit,los,Config,Field)
+                                if witness then
+                                local worst,endpointDistance=0,0
+                                if opponent then
+                                    worst=INF
+                                    local p0=Vector3.new(mid+offset.X,Config.ReleaseHeight,
+                                        los-Config.QBBackYards*yd+offset.Z)
+                                    local target=worldPoint(plan.Target,offset,Config.CatchHeight)
+                                    endpointDistance=flatDistance(target,opponent)
+                                    local height=3+(Config.HandUpOffset or 3.5)
+                                        +(Config.JumpHeight or 6)+(Config.CatchRadius or 3.75)
+                                    for sample=1,10 do
+                                        local u=sample/10
+                                        local at=p0:Lerp(target,u)+Vector3.new(0,4*plan.Apex*u*(1-u),0)
+                                        if at.Y<=height then
+                                            local reach=setupReach+sprint
+                                                *math.max(0,plan.Launch+plan.Flight*u-.15)+(Config.CatchRadius or 3.75)
+                                            worst=math.min(worst,flatDistance(at,opponent)-reach)
+                                        end
                                     end
+                                    if worst==INF then worst=0 end
                                 end
-                                if worst==INF then worst=0 end
+                                local shape=cutLead>=.29 and "sideline_cut_early"
+                                    or cutLead>=.21 and "sideline_cut_mid" or "sideline_cut_late"
+                                local penalty,failures,family,signature=adaptation(input,"Floater",shape,
+                                    depth,side,plan.Arrival)
+                                local progress=(math.min(finish.Y,Field.GoalZ+5*yd)-los)/yd
+                                local score=progress+clamp(worst/yd,-20,10)*1.7
+                                    +clamp(endpointDistance/yd,0,30)*.15-plan.Flight*.55-.85
+                                    +(side==favored and .15 or 0)-penalty
+                                local release=type(input.release)=="string" and input.release~=""
+                                    and Config.ReleaseDefs and Config.ReleaseDefs[input.release] and input.release or nil
+                                local distance=RouteMath.Length(points)+(plan.LeadTime or 0)*Config.FillSpeed
+                                local groundTime=travelTime(distance,Config,stamina)
+                                candidates[#candidates+1]={payload={Points=points,StartX=mid,Pass="Floater",Release=release},
+                                    plan=plan,score=score,reachable=true,runTime=groundTime,groundRunTime=groundTime,
+                                    estimatedSeparation=endpointDistance,defenderEnvelopeMargin=worst,
+                                    side=side,depth=depth,shape=shape,family=family,signature=signature,
+                                    cutCount=1,lastCutAt=cutAt,hikeTime=Config.HikeTime,setupDefenderReach=setupReach,
+                                    estimatedCatchZ=finish.Y,estimatedCatchAt=finishAt,estimatedRACDistance=0,
+                                    estimatedCatchStamina=finalStamina,uprightCatchReachable=uprightTime+dispatch<=finishWindow,
+                                    adaptationPenalty=penalty,recentFailureCount=failures,
+                                    middleStemDeep=true,stemYards=stem,cutLeadTime=cutLead,finishMode="jumpDive",
+                                    finishReachable=true,estimatedFinishAt=finishAt,estimatedFinishZ=finish.Y,
+                                    finishFraction=fraction,finishDistance=finishDistance,finishReserve=dispatch,
+                                    finishWindow=finishWindow,fullRouteDistance=distance,
+                                    estimatedLaunchStamina=launchStamina,estimatedLaunchX=launchPoint.X,
+                                    estimatedLaunchZ=launchPoint.Y,finishTravelTime=diveRun,
+                                    slowStem=true,slowStemTime=cutAt,slowStemSpeed=run,slowStemStartupSlack=dispatch,
+                                    forceDiveFinish=true,requireDive=true,finalSprint=true,startSprintAt=cutAt,cutAt=cutAt,
+                                    finalSprintDuration=sprintDuration,finalSprintReserve=staminaReserve,
+                                    finalSprintStamina=finalStamina,sidelineInset=edge+insetYards*yd,
+                                    sidelineFallback=insetYards>0,
+                                    diveWitnessElapsed=witness.elapsed,diveWitnessX=witness.root.X,
+                                    diveWitnessZ=witness.root.Z,diveWitnessMargin=witness.margin,
+                                    model="observed-opponent-envelope",routeStrategy="sideline-dive"}
+                                end
                             end
-                            local actualDepth=(points[3].Y-los)/yd
-                            local penalty,failures,family,signature=adaptation(input,"Floater",variant.name,
-                                actualDepth,side,plan.Arrival)
-                            local progress=(math.min(finish.Y,Field.GoalZ+5*yd)-los)/yd
-                            local score=progress+clamp(worst/yd,-20,10)*1.7
-                                +clamp(endpointDistance/yd,0,30)*.15-plan.Flight*.55-.25
-                                +(side==favored and .15 or 0)-(upright and 0 or .6)-penalty
-                            local release=type(input.release)=="string" and input.release~=""
-                                and Config.ReleaseDefs and Config.ReleaseDefs[input.release] and input.release or nil
-                            candidates[#candidates+1]={payload={Points=points,StartX=mid,Pass="Floater",Release=release},
-                                plan=plan,score=score,reachable=true,runTime=groundTime,
-                                groundRunTime=groundTime,estimatedSeparation=endpointDistance,
-                                defenderEnvelopeMargin=worst,side=side,depth=actualDepth,shape=variant.name,
-                                family=family,signature=signature,cutCount=1,lastCutAt=plan.Times[2],
-                                hikeTime=Config.HikeTime,setupDefenderReach=setupReach,
-                                estimatedCatchZ=finish.Y,estimatedCatchAt=finishAt,estimatedRACDistance=0,
-                                estimatedCatchStamina=math.max(0,launchStamina-math.min(finishRun,
-                                    launchStamina/math.max(.01,Config.SprintDrain))*Config.SprintDrain),
-                                uprightCatchReachable=upright,adaptationPenalty=penalty,recentFailureCount=failures,
-                                middleStemDeep=true,stemYards=stem,cutLeadTime=cutLead,
-                                finishMode=upright and "upright" or "jumpDive",finishReachable=true,
-                                estimatedFinishAt=finishAt,estimatedFinishZ=finish.Y,finishFraction=fraction,
-                                finishDistance=finishDistance,finishReserve=.12,finishWindow=finishWindow,
-                                fullRouteDistance=distance,estimatedLaunchStamina=launchStamina,
-                                estimatedLaunchX=launchPoint.X,estimatedLaunchZ=launchPoint.Y,
-                                finishTravelTime=upright and finishRun or diveRun-.12,
-                                model="observed-opponent-envelope",routeStrategy="middle-stem-deep"}
                         end
                     end
                 end
@@ -438,9 +499,10 @@ function Policy.chooseRoute(input,Config,Field,RouteMath)
             end
         end
     end
-    -- The requested middle-stem strategy supplies the candidate pool when its
-    -- native path and late finish are feasible. A genuinely positive ordinary
-    -- clearance option still prevents switching to a contested middle route.
+    -- Prefer the nearest feasible legal sideline before comparing timing/depth
+    -- variants. A positive ordinary clearance option still prevents switching
+    -- to a contested sideline route; a requested dive is not a safety guarantee.
+    local sidelineFallbackReason
     if input.middleStemDeep~=false then
         local middle=middleStemRoutes(input,Config,Field,RouteMath,los,stamina,opponent,favored,offset)
         local ordinaryClear=false
@@ -448,14 +510,26 @@ function Policy.chooseRoute(input,Config,Field,RouteMath)
             if opponent and candidate.reachable and candidate.defenderEnvelopeMargin>0 then ordinaryClear=true;break end
         end
         local accepted={}
+        local closestInset=INF
         for _,candidate in ipairs(middle) do
-            if not ordinaryClear or candidate.defenderEnvelopeMargin>0 then accepted[#accepted+1]=candidate end
+            if not ordinaryClear or candidate.defenderEnvelopeMargin>0 then
+                closestInset=math.min(closestInset,candidate.sidelineInset)
+            end
+        end
+        for _,candidate in ipairs(middle) do
+            if (not ordinaryClear or candidate.defenderEnvelopeMargin>0)
+                and candidate.sidelineInset<=closestInset+1e-5 then
+                accepted[#accepted+1]=candidate
+            end
         end
         if #accepted>0 then
             candidates=accepted;best=nil;trialCandidates={};trialTrigger=nil
             for _,candidate in ipairs(candidates) do
                 if not best or candidate.score>best.score then best=candidate end
             end
+        else
+            sidelineFallbackReason=#middle==0 and "No legal deep sideline dive meets the stamina and timing reserve"
+                or "Positive-clearance route retained over contested sideline dives"
         end
     end
     if best then
@@ -568,6 +642,8 @@ function Policy.chooseRoute(input,Config,Field,RouteMath)
         choice.goalCatchPreference=insideGoalFloater and "inside" or nearGoalFloater and "near" or "none"
         choice.goalReferenceScore=referenceScore>-INF and referenceScore or nil
         choice.variedSide=varySide;choice.variedCutTiming=varyCut
+        choice.sidelineFallbackReason=sidelineFallbackReason
+            or choice.sidelineFallback and "Closest feasible inset retains the final sprint reserve" or nil
         choice.goalClearanceToleranceUsed=insideGoalEligible(choice) and not pressureEligible(choice)
             and math.max(0,bestClearance-2*yd-choice.defenderEnvelopeMargin) or 0
         if trialTrigger and opponent and not hasClearance and referenceScore>-INF then
@@ -641,7 +717,10 @@ function Policy.movement(input,Config,Field,RouteMath)
         local distance=flatDistance(position,opponent)
         local lead=math.min(.45,distance/math.max(1,Config.SprintSpeed)*.3)
         local target=opponent+boundedVelocity(input.opponentVelocity,Config.SprintSpeed)*lead
-        return result(target,"pursue",true,.8)
+        local reserve=role=="DB" and 40 or 10
+        local stamina=finite(input.stamina) and math.max(0,input.stamina) or 0
+        local sprint=stamina>reserve+math.max(1,(Config.SprintDrain or 25)*.15)
+        return result(target,"pursue",sprint,.8)
     end
     if role=="WR" and input.carrierIsMe and (phase=="RAC" or phase=="Run") then
         local minX,maxX=worldBounds(Field,offset,margin)
@@ -678,6 +757,9 @@ function Policy.movement(input,Config,Field,RouteMath)
         if input.middleStemDeep==true and type(plan)=="table" and type(plan.Points)=="table"
             and #plan.Points>=3 and type(plan.Times)=="table" then
             local index=clamp(finite(input.routeWaypoint) and math.floor(input.routeWaypoint) or 2,2,#plan.Points)
+            local slowStem=input.slowStem==true and finite(input.slowStemTime)
+            local finalSprint=slowStem and input.finalSprintCommitted==true
+            if finalSprint then index=math.max(3,index) end
             local target,previous,delta,inbound,distance,deadline
             local function measure()
                 target=worldPoint(plan.Points[index],offset,position.Y)
@@ -686,7 +768,7 @@ function Policy.movement(input,Config,Field,RouteMath)
                 inbound=(target-previous)*FLAT
                 inbound=inbound.Magnitude>.01 and inbound.Unit or Vector3.new(0,0,1)
                 distance=delta.Magnitude
-                deadline=plan.Times[index]
+                deadline=slowStem and index==2 and input.slowStemTime or plan.Times[index]
             end
             measure()
             while index<#plan.Points and finite(deadline) and input.elapsed>=deadline do
@@ -695,12 +777,14 @@ function Policy.movement(input,Config,Field,RouteMath)
                 if distance>1.5 and not crossed then break end
                 index=index+1;measure()
             end
+            if slowStem and index>=3 then finalSprint=true end
             if finite(deadline) then
                 local run=math.max(1,Config.RunSpeed)
                 local sprintSpeed=math.max(run,Config.SprintSpeed)
                 local minimum=math.max(2,run*.2)
                 local remaining=deadline-input.elapsed
                 local speed=clamp(distance/math.max(.05,remaining+.05),minimum,sprintSpeed)
+                if slowStem and not finalSprint then speed=math.min(run,speed) end
                 local along=delta:Dot(inbound)
                 local atOrBeyond=along>=-1.5 and (delta-inbound*along).Magnitude<=1.5
                 if atOrBeyond and (remaining>0 or index==#plan.Points) then
@@ -711,11 +795,17 @@ function Policy.movement(input,Config,Field,RouteMath)
                     speed=minimum
                 end
                 local sprint=speed>run+.05
+                if finalSprint then
+                    local stamina=finite(input.stamina) and math.max(0,input.stamina) or 0
+                    sprint=stamina>10+math.max(1,(Config.SprintDrain or 25)*.1)
+                    speed=sprint and sprintSpeed or run
+                end
                 local request=result(target,"route",sprint,.1)
                 request.routeWaypoint=index
                 request.moveSpeed=speed
                 request.moveScale=speed/(sprint and sprintSpeed or run)
                 request.routeDeadline=deadline
+                request.finalSprintCommitted=finalSprint
                 return request
             end
         end
@@ -732,11 +822,12 @@ function Policy.movement(input,Config,Field,RouteMath)
         local nearGoal=goal-observed.Z<=6*yd
         local profile=type(input.defenseProfile)=="table" and input.defenseProfile or {}
         local bias=clamp(finite(profile.depthBiasYards) and profile.depthBiasYards or 0,0,2.5)*yd
-        -- Start slightly shallower than the WR, with room to drift naturally.
-        -- Observed deep-floater losses can shift this whole loose band deeper;
-        -- the profile never dictates a rigid distance or extra movement speed.
-        local preferred=-.75*yd+bias
-        local minDepth,maxDepth=-1.5*yd+bias,.5*yd+bias
+        -- Give the receiver room initially; gradually narrow that opening
+        -- space downfield instead of sprinting to mirror every early step.
+        local opening=clamp(((goal-observed.Z)/yd-8)/8,0,1)
+        local preferred=(-.75-3.25*opening)*yd+bias
+        local minDepth=preferred-(.75+.25*opening)*yd
+        local maxDepth=preferred+(1.25-.25*opening)*yd
         if nearGoal then
             minDepth=math.max(minDepth,-.5*yd)
             preferred=math.max(preferred,minDepth)
@@ -746,16 +837,18 @@ function Policy.movement(input,Config,Field,RouteMath)
         local lateralDelta=position.X-observed.X
         local lateral=math.abs(lateralDelta)
         local targetX=position.X
-        if lateral>yd then
-            targetX=observed.X+(lateralDelta>0 and yd or -yd)
+        local lateralBuffer=2*yd
+        if lateral>lateralBuffer then
+            targetX=observed.X+(lateralDelta>0 and lateralBuffer or -lateralBuffer)
         end
         local velocity=boundedVelocity(input.opponentVelocity,Config.SprintSpeed)
         -- A clear crossing can leave the receiver inside the lateral deadband
         -- just as forward motion stops. Walk toward the observed crossing's
         -- short lead instead of freezing until a full yard has opened.
         if phase=="Live" and velocity.X*(observed.X-position.X)>0
-            and math.abs(velocity.X)>Config.RunSpeed*.5 and lateral>.5*yd then
-            targetX=observed.X+velocity.X*.25
+            and math.abs(velocity.X)>Config.RunSpeed*.5 and lateral>1.5*yd then
+            local side=velocity.X>0 and 1 or -1
+            targetX=observed.X-side*1.5*yd+velocity.X*.25
         end
         -- Walk with clear forward movement before a persistent gap develops.
         -- The velocity lead is measured from the chosen shallow/deep shade,
@@ -769,13 +862,13 @@ function Policy.movement(input,Config,Field,RouteMath)
             targetZ=math.min(targetZ,position.Z)
         end
         local target=Vector3.new(targetX,position.Y,math.min(goal+yd,targetZ))
-        local urgent=velocity.Z>2 and (observedDepth < -3*yd
-            or nearGoal and observedDepth<minDepth-.5*yd)
-        local forwardThreat=velocity.Z>Config.RunSpeed*.5 and observedDepth < minDepth-.5*yd
-        local lateralThreat=lateral>4*yd and observedDepth<3*yd and velocity.Z>=-2
+        local urgent=velocity.Z>2 and (observedDepth < minDepth-2*yd
+            or nearGoal and observedDepth<minDepth-yd)
+        local forwardThreat=velocity.Z>Config.RunSpeed*.5 and observedDepth < minDepth-yd
+        local lateralThreat=lateral>6*yd and observedDepth<3*yd and velocity.Z>=-2
         local downfieldRecovery=not nearGoal and goal-observed.Z<=12*yd
             and velocity.Z>Config.RunSpeed*.5
-            and observedDepth<(input.sprintOn==true and preferred or minDepth)
+            and observedDepth<(input.sprintOn==true and minDepth or minDepth-yd)
         local retreatingSafe=velocity.Z < -2
         -- Allow a brief trail or a modest lead without restoring fixed spacing.
         -- Use observed positions so projection does not erase that free band.
@@ -784,7 +877,7 @@ function Policy.movement(input,Config,Field,RouteMath)
         local needsSprint=phase=="Live" and not retreatingSafe
             and (urgent or forwardThreat or lateralThreat or downfieldRecovery)
         local stamina=finite(input.stamina) and math.max(0,input.stamina) or 0
-        local startAt,stopAt=urgent and 50 or 75,urgent and 35 or 60
+        local startAt,stopAt=urgent and 75 or 85,urgent and 60 or 70
         local sprint=needsSprint and (input.sprintOn==true and stamina>stopAt
             or input.sprintOn~=true and stamina>=startAt)
         return result(target,"shadow",sprint,1.5)

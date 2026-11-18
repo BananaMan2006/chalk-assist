@@ -1,7 +1,7 @@
--- Opiumware autoexec loader for the verified Chalk It Up place.
--- Install this file in Opiumware/autoexec; keep the main file in workspace.
+-- Portable local autoexec loader for the verified Chalk It Up place.
+-- Use your executor's autoexec folder; keep the main file in its workspace.
 -- It runs once per joined server after attachment. F8 unloading stays unloaded.
--- This file does not attach Opiumware to Roblox or download any code.
+-- No account/path assumptions. It cannot attach an executor and downloads no code.
 
 local EXPECTED_GAME_ID = 10770281752
 local EXPECTED_PLACE_ID = 116097127629859
@@ -17,6 +17,11 @@ local function report(message)
 end
 local function runningAssist()
     if not env.ChalkDB or type(env.ChalkDB.status) ~= "function" then return false end
+    if type(env.ChalkDB.context) == "function" then
+        local good, context = pcall(env.ChalkDB.context)
+        if good and type(context) == "table" and context.jobId
+            and context.jobId ~= game.JobId then return false end
+    end
     local ok, status = pcall(env.ChalkDB.status)
     return ok and type(status) == "table" and type(status.auto) == "table"
 end
@@ -38,6 +43,11 @@ task.spawn(function()
         return waitUntil(function() return parent:FindFirstChild(name) end,
             parent.Name .. "." .. name)
     end
+    local function interrupted()
+        if env[MARKER] ~= boot or boot.state == "unloaded" then return true end
+        if runningAssist() then boot.state = "loaded";return true end
+        return false
+    end
 
     local success, failure = pcall(function()
         waitUntil(function() return game:IsLoaded() end, "Roblox to load")
@@ -53,7 +63,7 @@ task.spawn(function()
         boot = {jobId=game.JobId, placeId=game.PlaceId, gameId=game.GameId,
             state="waiting"}
         env[MARKER] = boot
-        if runningAssist() then
+        if previous==nil and runningAssist() then
             boot.state = "already-running"
             report("Chalk Assist is already running in this server.")
             return
@@ -82,11 +92,13 @@ task.spawn(function()
             child(lines, name)
         end
         child(field, "Endzone")
+        if interrupted() then return end
 
         assert(type(readfile) == "function", "Executor readfile is unavailable")
         assert(type(loadstring) == "function", "Executor loadstring is unavailable")
         local source = readfile(MAIN_FILE)
         local run, compileError = loadstring(source)
+        if interrupted() then return end
         assert(run, compileError)
         boot.state = "starting"
         run()

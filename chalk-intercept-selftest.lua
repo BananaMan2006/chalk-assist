@@ -502,6 +502,33 @@ return function(Planner)
         s.reachAirborne=nil
         check(Planner.solve(s)~=nil,"restored airborne reach was not usable")
     end)
+    test("required WR finish commits a real dive before first contact",function()
+        local s=snapshot(Vector3.new(10,1.4,0))
+        s.role,s.requireDive,s.chase,s.canDive="WR",true,true,true
+        s.walkSpeed,s.runSpeed,s.sprintSeconds=27,20,4
+        local p,why=Planner.solve(s)
+        check(p and p.diveAt,why)
+        local touch=Planner.firstTouch(s,p)
+        check(touch and touch.at>=p.diveAt+.03,"upright contact was mislabeled as diving")
+    end)
+    test("required WR dive does not silently fall back to an upright catch",function()
+        local s=snapshot(Vector3.new(10,1.4,0))
+        s.role,s.requireDive,s.chase="WR",true,true
+        s.walkSpeed,s.runSpeed,s.sprintSeconds=27,20,4
+        check(Planner.solve(s)==nil,"unavailable dive became an upright finish")
+    end)
+    test("already touching the ball cannot be called a future diving catch",function()
+        local s=snapshot(Vector3.new(1,3.5,0))
+        s.role,s.requireDive,s.chase,s.canDive="WR",true,true,true
+        s.walkSpeed,s.runSpeed,s.sprintSeconds=27,20,4
+        check(Planner.solve(s)==nil,"pre-dive contact was accepted")
+    end)
+    test("DB ignores WR-only required dive preference",function()
+        local s=snapshot()
+        s.role,s.requireDive="DB",true
+        local p,why=Planner.solve(s)
+        check(p and not p.diveAt,why)
+    end)
     -- Informational benchmark only; no timing-dependent pass/fail threshold.
     do
         local s=snapshot()

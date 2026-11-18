@@ -15,6 +15,9 @@ idle_guard = (root / "chalk-idle-guard.lua").read_text()
 fullplay_policy = (root / "chalk-fullplay-policy.lua").read_text()
 fullplay_controller = (root / "chalk-fullplay-controller.lua").read_text()
 match_skip_controller = (root / "chalk-match-skip-controller.lua").read_text()
+autoload_controller = (root / "chalk-autoload-controller.lua").read_text()
+bootstrap = (root / "chalk-bootstrap.lua").read_text()
+assert "]====]" not in bootstrap
 bundle = """local Planner = (function()
 %s
 end)()
@@ -70,7 +73,11 @@ local createMatchSkip = (function()
 %s
 end)()
 matchSkip = createMatchSkip({snapshot=api.context,previousState=previousState and previousState.matchSkip})
-""" % (planner, tackle, approach, motion, carrier_moves, controller, autoplay_policy, autoplay_controller, wr_repeat, idle_guard, fullplay_policy, fullplay_controller, match_skip_controller)
+local createAutoload = (function()
+%s
+end)()
+autoload = createAutoload({bootstrapSource=[====[%s]====]})
+""" % (planner, tackle, approach, motion, carrier_moves, controller, autoplay_policy, autoplay_controller, wr_repeat, idle_guard, fullplay_policy, fullplay_controller, match_skip_controller, autoload_controller, bootstrap)
 assert core.count("-- BUNDLED_INTERCEPT_INIT") == 1
 (root / "chalk-it-up-1v1.lua").write_text(core.replace("-- BUNDLED_INTERCEPT_INIT", bundle))
 print("Built chalk-it-up-1v1.lua")

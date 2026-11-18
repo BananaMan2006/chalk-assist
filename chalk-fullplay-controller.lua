@@ -33,6 +33,7 @@ return function(ctx,Policy,services)
     local lastLoggedWaypoint
     local roundKey,submitted,nextSubmit,submitTries=nil,false,0,0
     local laneSide,priorTarget,lastPhase,lastKind,lastSample=nil,nil,nil,nil,0
+    local finalSprintCommitted=false
     local message,errorMessage,saveError="Full auto off",nil,nil
     local navigationError
     local recentRoutes,memoryOpponent,activeRoute={},nil,nil
@@ -71,7 +72,11 @@ return function(ctx,Policy,services)
             "terminalResult","terminalAt","cutCount","lastCutAt","experimentalAttempt",
             "trialTrigger","experimentalClearanceGap","middleStemDeep","stemYards","cutLeadTime",
             "finishMode","estimatedFinishAt","estimatedFinishZ","finishReachable","finishDistance",
-            "finishTravelTime","finishReserve","finishFraction","routeStrategy"}) do
+            "finishTravelTime","finishReserve","finishFraction","routeStrategy","slowStem",
+            "slowStemTime","slowStemSpeed","slowStemStartupSlack","cutAt","startSprintAt","forceDiveFinish",
+            "requireDive","finalSprint","finalSprintDuration","finalSprintReserve","finalSprintStamina",
+            "sidelineInset","sidelineFallback","sidelineFallbackReason","diveWitnessElapsed",
+            "diveWitnessX","diveWitnessZ","diveWitnessMargin"}) do
             local v=value[key]
             if type(v)=="boolean" or type(v)=="string" and #v<=512
                 or type(v)=="number" and v==v and math.abs(v)<math.huge then out[key]=v end
@@ -171,6 +176,7 @@ return function(ctx,Policy,services)
         end
         local initial=memoryOpponent==nil
         recentRoutes,activeRoute={},nil
+        finalSprintCommitted=false
         recentDefense,activeDefense={},nil
         recentSelections,selectionIndex={},0
         lastLateBendTrialTrigger=nil
@@ -212,7 +218,10 @@ return function(ctx,Policy,services)
         if sameJob then
                 local pending=descriptor(old.activeRoute)
                 if pending and s.role=="WR" and s.phase~="Lobby" and s.phase~="Result"
-                    and pending.roundKey==tostring(s.preSnapEnds or "current") then activeRoute=pending end
+                    and pending.roundKey==tostring(s.preSnapEnds or "current") then
+                    activeRoute=pending;submitted=true;roundKey=pending.roundKey
+                    finalSprintCommitted=old.finalSprintCommitted==true and pending.slowStem==true
+                end
                 if old.routeRoundKey==tostring(s.preSnapEnds or "current")
                     and type(old.routeWaypoint)=="number" and old.routeWaypoint==old.routeWaypoint
                     and old.routeWaypoint>=2 and old.routeWaypoint<math.huge then
@@ -233,6 +242,7 @@ return function(ctx,Policy,services)
         if not activeRoute then return end
         local item=descriptor(activeRoute)
         activeRoute=nil
+        finalSprintCommitted=false
         if not item then return end
         item.success=success;item.contested=result=="Swatted" or result=="Intercepted"
         if result=="Catch" and success then item.catchSuccess=true end
@@ -299,6 +309,7 @@ return function(ctx,Policy,services)
     end
     local function inputFor(s,root)
         local opponent=rootOf(s.enemyCarrier and s.carrier or s.opponent)
+        local choice=selected or activeRoute
         return {LOS=s.LOS,offset=s.offset or Vector3.zero,position=root.Position,
             opponentPosition=opponent and opponent.Position,
             opponentVelocity=opponent and opponent.AssemblyLinearVelocity,
@@ -311,13 +322,16 @@ return function(ctx,Policy,services)
             laneSide=laneSide,priorTarget=priorTarget,recentRoutes=recentRoutes,
             recentSelections=recentSelections,selectionIndex=selectionIndex,routeWaypoint=routeWaypoint,
             lastLateBendTrialTrigger=lastLateBendTrialTrigger,defenseProfile=defenseProfile(),
-            middleStemDeep=selected and selected.middleStemDeep==true}
+            middleStemDeep=choice and choice.middleStemDeep==true,
+            slowStem=choice and choice.slowStem==true,slowStemTime=choice and choice.slowStemTime,
+            finalSprintCommitted=finalSprintCommitted}
     end
     local function resetRound(key)
         local pending=activeRoute and activeRoute.roundKey==key and activeRoute or nil
         roundKey=key;submitted=pending~=nil;nextSubmit=0;submitTries=0
         observationStarted=world:GetServerTimeNow()
         activeRoute=pending
+        if not pending then finalSprintCommitted=false end
         if not activeDefense or activeDefense.roundKey~=key then activeDefense=nil end
         routeWaypoint=2
         selected,routePlan,routeSource,planPass=nil,nil,nil,nil
@@ -372,7 +386,16 @@ return function(ctx,Policy,services)
             estimatedFinishAt=chosen.estimatedFinishAt,estimatedFinishZ=chosen.estimatedFinishZ,
             finishReachable=chosen.finishReachable,finishDistance=chosen.finishDistance,
             finishTravelTime=chosen.finishTravelTime,finishReserve=chosen.finishReserve,
-            finishFraction=chosen.finishFraction,routeStrategy=chosen.routeStrategy})
+            finishFraction=chosen.finishFraction,routeStrategy=chosen.routeStrategy,
+            slowStem=chosen.slowStem,slowStemTime=chosen.slowStemTime,cutAt=chosen.cutAt,
+            slowStemStartupSlack=chosen.slowStemStartupSlack,
+            startSprintAt=chosen.startSprintAt,forceDiveFinish=chosen.forceDiveFinish,
+            requireDive=chosen.requireDive,finalSprint=chosen.finalSprint,slowStemSpeed=chosen.slowStemSpeed,
+            finalSprintDuration=chosen.finalSprintDuration,finalSprintReserve=chosen.finalSprintReserve,
+            finalSprintStamina=chosen.finalSprintStamina,sidelineInset=chosen.sidelineInset,
+            sidelineFallback=chosen.sidelineFallback,sidelineFallbackReason=chosen.sidelineFallbackReason,
+            diveWitnessElapsed=chosen.diveWitnessElapsed,diveWitnessX=chosen.diveWitnessX,
+            diveWitnessZ=chosen.diveWitnessZ,diveWitnessMargin=chosen.diveWitnessMargin})
         if chosen.trialTrigger then lastLateBendTrialTrigger=chosen.trialTrigger end
         routeWaypoint=2
         recentSelections[#recentSelections+1]=descriptor(activeRoute)
@@ -399,6 +422,15 @@ return function(ctx,Policy,services)
             estimatedFinishZ=chosen.estimatedFinishZ,finishReachable=chosen.finishReachable,
             finishDistance=chosen.finishDistance,finishTravelTime=chosen.finishTravelTime,
             finishReserve=chosen.finishReserve,finishFraction=chosen.finishFraction,routeStrategy=chosen.routeStrategy,
+            slowStem=chosen.slowStem,slowStemTime=chosen.slowStemTime,cutAt=chosen.cutAt,
+            slowStemStartupSlack=chosen.slowStemStartupSlack,
+            startSprintAt=chosen.startSprintAt,requireDive=chosen.requireDive,
+            slowStemSpeed=chosen.slowStemSpeed,finalSprintDuration=chosen.finalSprintDuration,
+            finalSprintReserve=chosen.finalSprintReserve,finalSprintStamina=chosen.finalSprintStamina,
+            sidelineInset=chosen.sidelineInset,sidelineFallback=chosen.sidelineFallback,
+            sidelineFallbackReason=chosen.sidelineFallbackReason,
+            diveWitnessElapsed=chosen.diveWitnessElapsed,diveWitnessX=chosen.diveWitnessX,
+            diveWitnessZ=chosen.diveWitnessZ,diveWitnessMargin=chosen.diveWitnessMargin,
             hikeTime=chosen.hikeTime,setupDefenderReach=chosen.setupDefenderReach,
             estimatedCatchZ=chosen.estimatedCatchZ,estimatedCatchAt=chosen.estimatedCatchAt,
             estimatedRACDistance=chosen.estimatedRACDistance,estimatedCatchStamina=chosen.estimatedCatchStamina,
@@ -441,6 +473,7 @@ return function(ctx,Policy,services)
         local choice=Policy.movement(input,Config,Field,RouteMath)
         if not choice then return nil end
         if choice.routeWaypoint then routeWaypoint=choice.routeWaypoint end
+        if choice.finalSprintCommitted==true then finalSprintCommitted=true end
         laneSide,priorTarget=choice.laneSide,choice.target
         local delta=(choice.target-root.Position)*Vector3.new(1,0,1)
         local distance=delta.Magnitude
@@ -475,7 +508,7 @@ return function(ctx,Policy,services)
                 stamina=input.stamina,laneSide=laneSide,speed=h.WalkSpeed,moving=moving,
                 routeWaypoint=choice.routeWaypoint,defenseDepthBiasYards=input.defenseProfile.depthBiasYards,
                 defenseSamples=input.defenseProfile.samples,routeMoveSpeed=choice.moveSpeed,
-                routeDeadline=choice.routeDeadline})
+                routeDeadline=choice.routeDeadline,finalSprintCommitted=finalSprintCommitted})
         end
         return {direction=direction,sprint=moving and choice.sprint==true,message=message,
             preserveDepth=choice.kind=="shadow"}
@@ -498,6 +531,7 @@ return function(ctx,Policy,services)
         enabled=value==true
         errorMessage=nil
         laneSide,priorTarget,lastKind=nil,nil,nil
+        if not enabled then finalSprintCommitted=false end
         if not enabled and ctx.release then ctx.release() end
         message=enabled and "Full auto · ready" or "Full auto off"
         if type(write)=="function" then
@@ -584,16 +618,23 @@ return function(ctx,Policy,services)
             pass=selected and selected.payload.Pass or nil,counters=table.clone(counters),
             routeMemory=learningRecord(),
             defenseProfile=defenseProfile(),activeDefense=defenseDescriptor(activeDefense),
+            finalSprintCommitted=finalSprintCommitted,
             routeWaypoint=routeWaypoint,routeRoundKey=tostring(ctx.snapshot().preSnapEnds or "current"),
             activeRoute=descriptor(activeRoute)}
     end
     function api.catchIntent()
         -- Core context calls this; never recurse through ctx.snapshot/status.
-        if not alive or not enabled or not submitted or not activeRoute or not selected
-            or selected.middleStemDeep~=true then return nil end
+        local choice=selected or activeRoute
+        if not alive or not enabled or not submitted or not activeRoute or not choice then return nil end
         local point=routePlan and type(routePlan.Points)=="table" and routePlan.Points[routeWaypoint]
         if typeof(point)~="Vector2" or not finite(point.X) or not finite(point.Y) then point=nil end
-        return {deepFinish=true,side=selected.side,waypoint=point,goalZ=Field.GoalZ,endZ=Field.EndZ}
+        return {deepFinish=choice.middleStemDeep==true,side=choice.side,waypoint=point,goalZ=Field.GoalZ,endZ=Field.EndZ,
+            requireDive=true,
+            continuousSprint=finalSprintCommitted,finalSprint=finalSprintCommitted}
+    end
+    function api.movementBudget()
+        if not alive or not enabled then return nil end
+        return {dbReserve=40,wrReserve=10}
     end
     function api.unload()
         if not alive then return end

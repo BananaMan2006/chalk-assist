@@ -3,7 +3,17 @@ return function(Motion,source)
     local observe=assert(source:match("(    local function locomotionState.-)    local function motionState"))
     local release=assert(source:match("(    local function releaseSprint.-)    local function release%("))
     local refresh=assert(source:match("(        if plan and lastSnapshot then.-)        if wrReturn and"))
+    local budget=assert(source:match("(    local function sprintBudget.-)    local function snapshot"))
     local compile=loadstring or load
+    local reserve=assert(compile([[
+return function(Motion,f)
+    local trackedSprintRoot,sprintTracking,ownsSprint={},{},false
+    local Config={SprintDrain=25}
+    local me={GetAttribute=function(_,key) return f.attrs[key] end}
+    local Moves={HoldSprint=function(value) f.attrs.SprintOn=value;f.calls=(f.calls or 0)+1 end}
+]]..budget..[[
+    return enforceSprintReserve(f.context),trackedSprintRoot,sprintTracking
+end]],"sprint-reserve-fixture"))()
     local tracking=assert(compile([[
 return function(Motion,f)
     local trackedSprintRoot,sprintTracking,ownsSprint
@@ -91,6 +101,24 @@ end]],"pending-sprint-refresh-fixture"))()
         end
         local f={previous={speedScale=1},current={speedScale=1,sprintPending=true},grounded=false}
         assert(refreshPlan(Motion,f)~=nil and not f.logged,"airborne action was interrupted")
+    end)
+    test("Full Auto reserve releases sprint even when it did not own the request",function()
+        local f={attrs={SprintOn=true,Stamina=43},context={role="DB",playBudget={dbReserve=40}}}
+        local budget,root,tracking=reserve(Motion,f)
+        assert(not budget.canSprint and not f.attrs.SprintOn and f.calls==1)
+        assert(root==nil and tracking==nil,"old sprint tracking survived forced release")
+    end)
+    test("manual catch control does not force off the user's sprint",function()
+        local f={attrs={SprintOn=true,Stamina=1},context={role="WR"}}
+        local budget=reserve(Motion,f)
+        assert(not budget.enforced and f.attrs.SprintOn and f.calls==nil)
+    end)
+    test("WR reserve permits the final sprint above its dispatch floor",function()
+        local f={attrs={SprintOn=true,Stamina=14},context={role="WR",playBudget={wrReserve=10}}}
+        local budget=reserve(Motion,f)
+        assert(budget.canSprint and budget.seconds==.04 and f.attrs.SprintOn)
+        f.attrs.Stamina=13;budget=reserve(Motion,f)
+        assert(not budget.canSprint and not f.attrs.SprintOn)
     end)
     return report
 end

@@ -6,6 +6,20 @@ local Motion={}
 local function finite(n)
     return type(n)=="number" and n==n and math.abs(n)<math.huge
 end
+-- Full-auto reserves are excluded from both reach prediction and dispatch.
+-- A short dispatch allowance covers the next frame/native sprint-off delay.
+function Motion.sprintBudget(role,stamina,drain,policy)
+    stamina=finite(stamina) and math.max(0,stamina) or 0
+    drain=finite(drain) and math.max(1,drain) or 25
+    local requested=type(policy)=="table" and (role=="DB" and policy.dbReserve
+        or role=="WR" and policy.wrReserve) or nil
+    local reserved=finite(requested)
+    local reserve=reserved and math.max(0,math.min(95,requested)) or 2
+    local dispatch=reserved and drain*.12 or 0
+    local available=math.max(0,stamina-reserve-dispatch)
+    return {seconds=available/drain,canSprint=available>0,
+        reserve=reserve,cutoff=reserve+dispatch,enforced=reserved}
+end
 -- SprintOn acknowledges the local request, not the server's actual speed.
 -- Keep this observation across replans; callers clear it when ownership or the
 -- character changes. Penalties and confirmed sprint use their own forecasts.

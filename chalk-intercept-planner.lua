@@ -350,6 +350,7 @@ function Planner.solve(s)
         +math.max(cfg(s,"CatchRadius",3.75),cfg(s,"DiveCatchRadius",2.5))
         +math.max(0,-(s.margin or 0.3))
     local wr=s.role=="WR"
+    local requireDive=wr and s.requireDive==true
     local scoringIntent=wr and finite(s.preferGoalZ)
     local defenderAt,defenderKnown,observedDefenderAt
     local retainedDeadline=wr and finite(s.defenderDeadline)
@@ -438,6 +439,7 @@ function Planner.solve(s)
             if tier==bestTier and not contested and s.arc.P1.Z>=s.arc.P0.Z
                 and candidate.contactPosition.Z<bestProgress-0.03 then return end
             local touch=intentTouch or Planner.firstTouch(s,candidate)
+            if requireDive and (not candidate.diveAt or touch.at<candidate.diveAt+.03) then return end
             if not inBounds(s,touch.root) then return end
             local better=tier<bestTier or not best
             if not better and tier==bestTier then
@@ -576,11 +578,11 @@ function Planner.solve(s)
       end
     end
     if s.role=="WR" then
-        search(true,false)
+        if not requireDive then search(true,false) end
         -- Ordinary WR assistance remains upright-first. A submitted deep
         -- scoring route may use a clear diving goal-line catch over a shorter
         -- upright catch; contested deep windows never outrank clear catches.
-        if not best or scoringIntent and not best.scoringCatch and best.safety~="contested" then
+        if requireDive or not best or scoringIntent and not best.scoringCatch and best.safety~="contested" then
             search(false,true)
             if best and best.diveAt then
                 best.diveReason=scoringIntent and "Timed full-auto deep catch" or "No reachable upright catch"
@@ -589,6 +591,7 @@ function Planner.solve(s)
         if scoringIntent and best and best.diveAt then
             best.diveReason="Timed full-auto deep catch"
         end
+        if requireDive and best then best.diveReason="Planned sideline dive finish" end
     else
         search(true,true)
     end
@@ -632,8 +635,8 @@ function Planner.solve(s)
         -- option fails. Keep the native capsule and physics; relax only the
         -- time/margin buffer, and still exhaust upright options before diving.
         relaxed,refining=true,true
-        search(true,false)
-        if not best then refine(true,false,false) end
+        if not requireDive then search(true,false) end
+        if not best and not requireDive then refine(true,false,false) end
         if not best and canDive then refine(false,true,true) end
         if best and best.diveAt then best.diveReason="No normal or last-resort upright catch" end
     end
@@ -658,6 +661,7 @@ function Planner.solve(s)
         best.riskReason="Only a narrow native contact window remains"
         best.searchRefinement="Bounded last-resort native contact search"
     end
+    if best and requireDive then best.diveReason="Planned sideline dive finish" end
     local threat
     if wr then
         local committed=retainedDeadline and defenderAt or nil

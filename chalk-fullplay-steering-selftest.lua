@@ -14,6 +14,7 @@ return function(fixture)
         HoldSprint=function(value) fixture.sprinting=value end}
     local function ownInput() end
     local function releaseSprint() fixture.sprinting=false end
+    local function sprintBudget() return {canSprint=fixture.canSprint~=false} end
     local carrierAssist=fixture.carrier
 ]]..smooth..navigate..[[
     return function(dt) return updateFullplay({},fixture.root,fixture.humanoid,0,dt) end
@@ -91,6 +92,11 @@ end
         local f=harness({update=function() return false end})
         local direction=f:move(Vector3.new(0,0,1),false)
         assert(direction.Z>.999 and f.sprinting)
+    end)
+    test("reserve blocks a requested sprint without blocking movement",function()
+        local f=harness();f.canSprint=false
+        local direction=f:move(Vector3.new(0,0,1),false)
+        assert(direction.Z>.999 and not f.sprinting)
     end)
     return report
 end
