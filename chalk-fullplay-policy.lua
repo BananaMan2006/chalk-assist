@@ -966,6 +966,12 @@ function Policy.movement(input,Config,Field,RouteMath)
         -- Give the receiver room for the opening .8 seconds. Then walk the
         -- desired trail toward .75 yards by 2.3 seconds. The opening walking
         -- target is two yards shallow, with a one-to-three-yard free band.
+        local lossBias=bias
+        local patternShade=clamp(finite(profile.deepAttemptShadeYards) and profile.deepAttemptShadeYards or 0,0,0.75)*yd
+        -- Confirmed deep attempts can start walking with the receiver earlier.
+        -- This does not deepen setup, widen the existing goal-side hold band,
+        -- or spend sprint sooner. It is a floor, never an added spacing offset.
+        bias=math.max(lossBias,patternShade)
         local geometricOpening=clamp(((goal-observed.Z)/yd-8)/8,0,1)
         local opening=geometricOpening
         if phase=="Live" and finite(input.elapsed) then
@@ -977,7 +983,7 @@ function Policy.movement(input,Config,Field,RouteMath)
         -- Moving the desired walking target is not a new sprint emergency.
         -- Keep sprint thresholds on the original geometric spacing, including
         -- its learned bias and existing near-goal floor.
-        local sprintMinDepth=(-.75-3.25*geometricOpening)*yd+bias
+        local sprintMinDepth=(-.75-3.25*geometricOpening)*yd+lossBias
             -(.75+.25*geometricOpening)*yd
         if nearGoal then
             minDepth=math.max(minDepth,-.5*yd)
@@ -989,7 +995,7 @@ function Policy.movement(input,Config,Field,RouteMath)
         -- Once play starts, retain a nearby goal-side position. Do not erase
         -- the legal opening cushion by walking backward through a stationary
         -- receiver or a velocity sample that has not arrived yet.
-        local holdDepth=3*yd+bias
+        local holdDepth=3*yd+lossBias
         if finite(input.elapsed) and input.elapsed>=0 and input.elapsed<.4 then
             local los=(finite(input.LOS) and input.LOS
                 or finite(Field.LOSZ) and Field.LOSZ or observed.Z-offset.Z)+offset.Z

@@ -1034,6 +1034,58 @@ return function(Policy,create,routeSource,policySource)
         near(targets[3],90+4.5*Field.YD)
         near(targets[3],targets[4])
     end)
+    test("repeated deep-attempt shade starts Live walking without changing setup or adding loss bias",function()
+        local p=input({role="DB",phase="Live",elapsed=2.5,
+            position=Vector3.new(0,3,34.5),opponentPosition=Vector3.new(0,3,30),
+            opponentVelocity=Vector3.new(0,0,20),defenseProfile={depthBiasYards=0}})
+        local ordinary=move(p);near(ordinary.target.Z,p.position.Z)
+        p.defenseProfile.deepAttemptShadeYards=.75
+        local adapted=move(p)
+        assert(adapted.target.Z>ordinary.target.Z and not adapted.sprint,
+            "observed deep pattern did not begin walking before the receiver passed")
+        for _,phase in ipairs({"PreSnap","Live"}) do
+            p.phase=phase;p.defenseProfile={depthBiasYards=2,deepAttemptShadeYards=0}
+            local loss=move(p);p.defenseProfile.deepAttemptShadeYards=.75
+            local both=move(p);near(both.target.Z,loss.target.Z)
+            assert(both.sprint==loss.sprint,"pattern was added to the loss bias")
+        end
+        p.phase="PreSnap";p.defenseProfile={depthBiasYards=0,deepAttemptShadeYards=0}
+        local setup=move(p);p.defenseProfile.deepAttemptShadeYards=.75
+        near(move(p).target.Z,setup.target.Z)
+    end)
+    test("deep-attempt walking shade preserves hold width sprint reserves and field symmetry",function()
+        for _,bias in ipairs({0,1.25,2.5}) do
+            for _,z in ipairs({30,90,110}) do
+                for _,gap in ipairs({-8,-4,-2,0,2,4}) do
+                    for _,stamina in ipairs({40,60,70,75,85,100}) do
+                        for _,active in ipairs({false,true}) do
+                            local p=input({role="DB",phase="Live",elapsed=2.5,
+                                position=Vector3.new(0,3,z+gap*Field.YD),
+                                opponentPosition=Vector3.new(0,3,z),opponentVelocity=Vector3.new(0,0,27),
+                                stamina=stamina,sprintOn=active,defenseProfile={depthBiasYards=bias}})
+                            local baseline=move(p);p.defenseProfile.deepAttemptShadeYards=.75
+                            assert(move(p).sprint==baseline.sprint,
+                                "walking adaptation changed a native sprint reserve/urgency gate")
+                        end
+                    end
+                end
+            end
+        end
+        local p=input({role="DB",phase="Live",elapsed=2.5,
+            position=Vector3.new(0,3,30+3.5*Field.YD),opponentPosition=Vector3.new(0,3,30),
+            defenseProfile={depthBiasYards=0,deepAttemptShadeYards=.75}})
+        assert(move(p).target.Z<p.position.Z,"pattern widened the goal-side hold band")
+        for _,side in ipairs({-1,1}) do
+            p.position=Vector3.new(side*8,3,34.5);p.opponentPosition=Vector3.new(side*10,3,30)
+            p.opponentVelocity=Vector3.new(side*12,0,20)
+            local localChoice=move(p);local offset=Vector3.new(100,0,-70)
+            p.offset=offset;p.position=p.position+offset;p.opponentPosition=p.opponentPosition+offset
+            local shifted=move(p)
+            near(shifted.target.X,localChoice.target.X+offset.X)
+            near(shifted.target.Z,localChoice.target.Z+offset.Z)
+            assert(shifted.sprint==localChoice.sprint);p.offset=Vector3.zero
+        end
+    end)
     test("DB intentional opening gap and ordinary receiver movement do not spend sprint",function()
         for _,speed in ipairs({0,12,20,27}) do
             for _,gap in ipairs({-5,-4.5,-4,-3,0,4}) do
@@ -1559,6 +1611,55 @@ return function(Policy,create,routeSource,policySource)
         alreadyDeep.api.onFx({Type="BallResult",Result="Catch",Catcher=alreadyDeep.opponent})
         near(alreadyDeep.api.status().defenseProfile.depthBiasYards,0)
     end)
+    test("two confirmed deep attempts shade walking without waiting for a conceded catch",function()
+        local h=harness();h.api.setEnabled(true)
+        near(h.api.status().defenseProfile.deepAttemptShadeYards,0)
+        observedDefenseThrow(h)
+        near(h.api.status().defenseProfile.deepAttemptShadeYards,0)
+        h.api.onFx({Type="BallResult",Result="Incomplete"})
+        local first=h.api.status().defenseProfile
+        near(first.deepAttemptShadeYards,0);assert(first.recentDeepAttempts==1,
+            "first 2010-style attempt was retroactively treated as an established pattern")
+        observedDefenseThrow(h);h.api.onFx({Type="BallResult",Result="Intercepted"})
+        local second=h.api.status().defenseProfile
+        near(second.depthBiasYards,0);near(second.deepAttemptShadeYards,.75)
+        assert(second.recentDeepAttempts==2 and second.deepFloaterLosses==0)
+        h.api.onFx({Type="BallResult",Result="Intercepted"})
+        assert(h.api.status().defenseProfile.samples==2,"duplicate stop created another deep attempt")
+        observedDefenseThrow(h,{pass="Bullet",targetZ=Field.LOSZ+21*Field.YD})
+        h.api.onFx({Type="BallResult",Result="Swatted"})
+        near(h.api.status().defenseProfile.deepAttemptShadeYards,.75)
+    end)
+    test("deep-attempt shade uses only last three plays and clears on a newly short pass",function()
+        for _,result in ipairs({"Catch","Swatted"}) do
+            local h=harness();h.api.setEnabled(true)
+            for _=1,2 do observedDefenseThrow(h);h.api.onFx({Type="BallResult",Result="Incomplete"}) end
+            observedDefenseThrow(h,{pass="Bullet",targetZ=Field.LOSZ+7.99*Field.YD})
+            h.api.onFx({Type="BallResult",Result=result,Catcher=h.opponent})
+            local profile=h.api.status().defenseProfile
+            assert(profile.recentDeepAttempts==2);near(profile.deepAttemptShadeYards,0)
+        end
+        local h=harness();h.api.setEnabled(true)
+        for _=1,2 do observedDefenseThrow(h);h.api.onFx({Type="BallResult",Result="Incomplete"}) end
+        observedDefenseThrow(h,{pass="Bullet",targetZ=Field.LOSZ+8*Field.YD})
+        h.api.onFx({Type="BallResult",Result="Swatted"})
+        near(h.api.status().defenseProfile.deepAttemptShadeYards,.75)
+        observedDefenseThrow(h,{pass="Bullet",targetZ=Field.LOSZ+21*Field.YD})
+        h.api.onFx({Type="BallResult",Result="Swatted"})
+        local expired=h.api.status().defenseProfile
+        near(expired.deepAttemptShadeYards,0);assert(expired.recentDeepAttempts==1)
+    end)
+    test("deep-attempt shade is derived from existing opponent-scoped memory and finite local geometry",function()
+        local h=harness({accountId=123,time=100});h.api.setEnabled(true)
+        for _,offset in ipairs({Vector3.zero,Vector3.new(100,0,-70)}) do
+            observedDefenseThrow(h,{offset=offset});h.api.onFx({Type="BallResult",Result="Swatted"})
+        end
+        near(h.api.status().defenseProfile.deepAttemptShadeYards,.75)
+        local restored=harness({accountId=123,time=200,jobId="job-b",memoryDisk=h.memoryDisk})
+        near(restored.api.status().defenseProfile.deepAttemptShadeYards,.75)
+        assert(restored.api.status().activeDefense==nil)
+        restored.accountId=456;near(restored.api.status().defenseProfile.deepAttemptShadeYards,0)
+    end)
     test("defense learning rejects missing arcs WR Team testing and outcomes from a later round",function()
         for _,options in ipairs({{noArc=true},{role="WR"},{mode="Team"},{testing=true}}) do
             local h=harness();h.api.setEnabled(true);observedDefenseThrow(h,options)
@@ -2015,6 +2116,59 @@ return function(Policy,create,routeSource,policySource)
         assert(#recent==1 and recent[1].success==false and recent[1].catchSuccess==true
             and recent[1].terminalResult=="Tackled",
             "a first-down tackle incorrectly rewarded the touchdown objective")
+    end)
+    test("adaptive first-down tackle keeps catch progress and does not poison the route family",function()
+        local original=Policy.chooseRoute
+        local ok,reason=pcall(function()
+            for _,flag in ipairs({"adaptiveUnderneath","pacedSlant"}) do
+                Policy.chooseRoute=function(...)
+                    local c=assert(original(...));c[flag]=true;c.requireDive=false;return c
+                end
+                local h=harness();h.api.setEnabled(true);h:settle();finishWR(h,"Catch",h.character)
+                h.snapshot.phase="Result"
+                h.api.onMatch({Phase="Result",Result="Tackled",Down=2,Role="WR"})
+                local old=h.api.status();local item=old.routeMemory.recentRoutes[1]
+                assert(item.success and item.catchSuccess and item.terminalResult=="Tackled"
+                    and item.terminalPointLost==false,"first-down progress became a failed adaptive family")
+                local at=item.terminalAt;local writes=h.memoryWrites
+                h.time=h.time+.2;h.api.onMatch({Phase="Result",Result="Tackled",Down=2,Role="WR"})
+                h.api.onFx({Type="BallResult",Result="Catch",Catcher=h.character})
+                item=h.api.status().routeMemory.recentRoutes[1]
+                assert(item.success and item.terminalAt==at and h.memoryWrites==writes,
+                    "duplicate progress packet rewrote the terminal outcome")
+                local nextGame=harness({saved="on",previousState=old,time=h.time,jobId="next-job"})
+                local restored=nextGame.api.status().routeMemory.recentRoutes[1]
+                assert(restored.success and restored[flag] and restored.terminalPointLost==false)
+            end
+        end)
+        Policy.chooseRoute=original;assert(ok,reason)
+    end)
+    test("adaptive tackles still penalize opponent points and weaker duplicates cannot erase the loss",function()
+        local original=Policy.chooseRoute
+        local ok,reason=pcall(function()
+            for _,flag in ipairs({"adaptiveUnderneath","pacedSlant"}) do
+                Policy.chooseRoute=function(...)
+                    local c=assert(original(...));c[flag]=true;c.requireDive=false;return c
+                end
+                for _,point in ipairs({"Opp","Them","scorer"}) do
+                    local h=harness();h.api.setEnabled(true);h:settle();h.snapshot.phase="Result"
+                    -- Missing BallResult must still create exactly one catch
+                    -- record before the terminal point is applied.
+                    local packet={Phase="Result",Result="Tackled",Role="WR"}
+                    if point=="scorer" then packet.ScorerIsYou=false else packet.Point=point end
+                    h.api.onMatch(packet)
+                    local item=h.api.status().routeMemory.recentRoutes[1]
+                    assert(item.catchSuccess and not item.success and item.terminalPointLost)
+                    local at=item.terminalAt
+                    h.time=h.time+.2;h.api.onMatch({Phase="Result",Result="Tackled",Role="WR"})
+                    h.api.onFx({Type="BallResult",Result="Catch",Catcher=h.character})
+                    local recent=h.api.status().routeMemory.recentRoutes
+                    assert(#recent==1 and recent[1].terminalPointLost and not recent[1].success
+                        and recent[1].terminalAt==at,"weaker duplicate erased a confirmed adaptive point loss")
+                end
+            end
+        end)
+        Policy.chooseRoute=original;assert(ok,reason)
     end)
     test("tackle without BallResult records possession and failure exactly once",function()
         local h=harness();h.api.setEnabled(true);h:settle()

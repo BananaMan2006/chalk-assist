@@ -352,6 +352,7 @@ function Planner.solve(s)
     local wr=s.role=="WR"
     local requireDive=wr and s.requireDive==true
     local scoringIntent=wr and finite(s.preferGoalZ)
+    local uprightFinish=requireDive and scoringIntent and s.allowUprightFinish==true
     local defenderAt,defenderKnown,observedDefenderAt
     local retainedDeadline=wr and finite(s.defenderDeadline)
         and s.defenderDeadline>=s.launchAt+0.12 and s.defenderDeadline or nil
@@ -387,6 +388,15 @@ function Planner.solve(s)
         end
     end
     local function consider(p,t)
+        -- The explicit finish exception still needs normal contact and known
+        -- coverage. Contested options retain the ordinary action/time ranking.
+        if uprightFinish and not p.diveAt and (relaxed or not defenderKnown) then return end
+        -- This is the same >60 ms advantage test used below, before the
+        -- expensive native contact scan. Clear diving catches remain eligible.
+        if uprightFinish and p.diveAt and best and not best.diveAt
+            and best.safety=="contested" and defenderAt
+            and s.now+t+(s.contestBuffer or 0.08)>=defenderAt
+            and best.contactAt-(s.now+t)<=0.06 then return end
         local candidate,missMargin=contact(s,p,t,relaxed and 0.05 or nil,
             relaxed and 0.004 or nil)
         if not candidate then
@@ -439,7 +449,13 @@ function Planner.solve(s)
             if tier==bestTier and not contested and s.arc.P1.Z>=s.arc.P0.Z
                 and candidate.contactPosition.Z<bestProgress-0.03 then return end
             local touch=intentTouch or Planner.firstTouch(s,candidate)
-            if requireDive and (not candidate.diveAt or touch.at<candidate.diveAt+.03) then return end
+            if requireDive and (not candidate.diveAt or touch.at<candidate.diveAt+.03) then
+                if not (uprightFinish and not candidate.diveAt and not relaxed
+                    and defenderKnown and (contested or scoringCatch)) then return end
+                candidate.uprightFinishOverride=true
+                candidate.uprightFinishReason=contested and "Earlier normal contested upright catch"
+                    or "Normal clear upright goal catch"
+            end
             if not inBounds(s,touch.root) then return end
             local better=tier<bestTier or not best
             if not better and tier==bestTier then
@@ -578,11 +594,12 @@ function Planner.solve(s)
       end
     end
     if s.role=="WR" then
-        if not requireDive then search(true,false) end
+        if not requireDive or uprightFinish then search(true,false) end
         -- Ordinary WR assistance remains upright-first. A submitted deep
         -- scoring route may use a clear diving goal-line catch over a shorter
         -- upright catch; contested deep windows never outrank clear catches.
-        if requireDive or not best or scoringIntent and not best.scoringCatch and best.safety~="contested" then
+        if (requireDive and not (uprightFinish and best and best.safety=="clear" and best.scoringCatch))
+            or not best or scoringIntent and not best.scoringCatch and best.safety~="contested" then
             search(false,true)
             if best and best.diveAt then
                 best.diveReason=scoringIntent and "Timed full-auto deep catch" or "No reachable upright catch"
@@ -591,7 +608,7 @@ function Planner.solve(s)
         if scoringIntent and best and best.diveAt then
             best.diveReason="Timed full-auto deep catch"
         end
-        if requireDive and best then best.diveReason="Planned sideline dive finish" end
+        if requireDive and best and best.diveAt then best.diveReason="Planned sideline dive finish" end
     else
         search(true,true)
     end
@@ -665,7 +682,7 @@ function Planner.solve(s)
         best.riskReason="Only a narrow native contact window remains"
         best.searchRefinement="Bounded last-resort native contact search"
     end
-    if best and requireDive then best.diveReason="Planned sideline dive finish" end
+    if best and requireDive and best.diveAt then best.diveReason="Planned sideline dive finish" end
     local threat
     if wr then
         local committed=retainedDeadline and defenderAt or nil

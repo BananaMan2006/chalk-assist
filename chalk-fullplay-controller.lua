@@ -46,7 +46,7 @@ return function(ctx,Policy,services)
     local api={}
     local function log(kind,data)
         if type(append)~="function" then return end
-        data=data or {};data.kind=kind;data.time=world:GetServerTimeNow();data.version="2.48"
+        data=data or {};data.kind=kind;data.time=world:GetServerTimeNow();data.version="2.49"
         pcall(function() append("ciu_fullplay_events.jsonl",http:JSONEncode(data)..string.char(10)) end)
     end
     local function pauseReason(s)
@@ -69,7 +69,7 @@ return function(ctx,Policy,services)
         local out={}
         for _,key in ipairs({"pass","side","depth","shape","family","signature","success",
             "contested","result","time","roundKey","arrival","catchSuccess",
-            "terminalResult","terminalAt","cutCount","lastCutAt","experimentalAttempt",
+            "terminalResult","terminalAt","terminalPointLost","cutCount","lastCutAt","experimentalAttempt",
             "trialTrigger","experimentalClearanceGap","middleStemDeep","stemYards","cutLeadTime",
             "finishMode","estimatedFinishAt","estimatedFinishZ","finishReachable","finishDistance",
             "finishTravelTime","finishReserve","finishFraction","routeStrategy","slowStem",
@@ -130,7 +130,18 @@ return function(ctx,Policy,services)
                 bias=math.max(0,bias-.5)
             end
         end
-        return {depthBiasYards=bias,samples=#recentDefense,deepFloaterLosses=losses}
+        local attempts=0
+        for i=math.max(1,#recentDefense-2),#recentDefense do
+            local item=recentDefense[i]
+            if item.pass=="Floater" and item.deepEndzone then attempts=attempts+1 end
+        end
+        local latest=recentDefense[#recentDefense]
+        -- Repeated observed deep throws describe the opponent's current play
+        -- selection even when stopped. A newly short pass removes this shade;
+        -- the separate outcome-based learning above remains unchanged.
+        local shortLatest=latest and latest.targetDepthYards<8
+        return {depthBiasYards=bias,samples=#recentDefense,deepFloaterLosses=losses,
+            recentDeepAttempts=attempts,deepAttemptShadeYards=attempts>=2 and not shortLatest and 0.75 or 0}
     end
     local function validId(value)
         return type(value)=="number" and value==value and value>0 and value<math.huge
@@ -313,6 +324,7 @@ return function(ctx,Policy,services)
         log("defenseOutcome",{pass=item.pass,result=result,opponentCaught=item.opponentCaught,
             deepEndzone=item.deepEndzone,depthAtThrow=item.depthAtThrow,targetDepthYards=item.targetDepthYards,
             goalDistanceYards=item.goalDistanceYards,depthBiasYards=profile.depthBiasYards,
+            deepAttemptShadeYards=profile.deepAttemptShadeYards,recentDeepAttempts=profile.recentDeepAttempts,
             samples=profile.samples,playKey=item.playKey})
     end
     local function enemyCaught(s,catcher)
@@ -549,6 +561,7 @@ return function(ctx,Policy,services)
                 opponentDistance=opponent and ((opponent-root.Position)*Vector3.new(1,0,1)).Magnitude,
                 stamina=input.stamina,laneSide=laneSide,speed=h.WalkSpeed,moving=moving,
                 routeWaypoint=choice.routeWaypoint,defenseDepthBiasYards=input.defenseProfile.depthBiasYards,
+                defenseAttemptShadeYards=input.defenseProfile.deepAttemptShadeYards,
                 defenseSamples=input.defenseProfile.samples,routeMoveSpeed=choice.moveSpeed,
                 routeDeadline=choice.routeDeadline,finalSprintCommitted=finalSprintCommitted})
         end
@@ -609,15 +622,19 @@ return function(ctx,Policy,services)
         if s.role=="WR" and (s.mode==nil or s.mode=="1v1") and not s.testing and data.Phase=="Result"
             and data.Result=="Tackled" then
             local key=tostring(s.preSnapEnds or roundKey or "current")
-            -- The offense objective is a touchdown on this down. Any own-WR
-            -- tackle misses it, even when the first down awards no point.
-            -- Preserve possession evidence and revise one same-round record.
+            -- An adaptive underneath/slant catch may deliberately advance the
+            -- next down. Keep that progress separate from a lost point; a
+            -- later duplicate without Point must never erase a confirmed loss.
             if activeRoute and activeRoute.roundKey==key then recordOutcome("Catch",true) end
             for i=#recentRoutes,1,-1 do
                 local item=recentRoutes[i]
                 if item.roundKey==key and (item.catchSuccess==true or item.result=="Catch" and item.success) then
-                    if item.terminalResult~="Tackled" or item.success~=false then
-                        item.catchSuccess=true;item.success=false
+                    local pointLost=item.terminalPointLost==true or data.Point=="Opp"
+                        or data.Point=="Them" or data.ScorerIsYou==false
+                    local progress=(item.adaptiveUnderneath==true or item.pacedSlant==true) and not pointLost
+                    if item.terminalResult~="Tackled" or item.success~=progress
+                        or item.terminalPointLost~=pointLost then
+                        item.catchSuccess=true;item.success=progress;item.terminalPointLost=pointLost
                         item.terminalResult="Tackled";item.terminalAt=world:GetServerTimeNow()
                         saveMemory()
                         log("routeOutcomeUpdated",descriptor(item))

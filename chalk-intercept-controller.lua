@@ -114,7 +114,7 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
         fields = fields or {}
         if fields.defenderAt==math.huge or fields.defenderAt==-math.huge then fields.defenderAt=nil end
         fields.kind, fields.time = kind, workspace:GetServerTimeNow()
-        fields.version="2.48"
+        fields.version="2.49"
         fields.launchAt=fields.launchAt or throwKey
         table.insert(history, fields)
         if #history > 80 then table.remove(history, 1) end
@@ -269,14 +269,22 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
                 if item then table.insert(opponentSnapshots,item) end
             end
         end
+        local finishGoal
+        if s.role=="WR" and s.catchIntent and s.catchIntent.deepFinish==true then
+            local goal=s.catchIntent.goalZ
+            if type(goal)=="number" and goal==goal and math.abs(goal)<math.huge then
+                finishGoal=goal+(s.offset and s.offset.Z or 0)
+            end
+        end
         return {now=now, arc=s.arc, launchAt=s.launchAt,role=s.role,
             continuousApproach=s.role=="WR" and s.catchIntent and s.catchIntent.deepFinish==true
                 and s.catchIntent.continuousSprint~=true,
             continuousSprint=s.role=="WR" and s.catchIntent and s.catchIntent.continuousSprint==true,
             requireDive=s.role=="WR" and s.catchIntent and s.catchIntent.requireDive==true,
+            allowUprightFinish=s.playBudget~=nil and finishGoal~=nil
+                and s.catchIntent.requireDive==true,
             sprintReserve=budget.reserve,
-            preferGoalZ=s.role=="WR" and s.catchIntent and s.catchIntent.deepFinish
-                and s.catchIntent.goalZ+(s.offset and s.offset.Z or 0) or nil,
+            preferGoalZ=finishGoal,
             defenderDeadline=s.role=="WR" and wrDefenderDeadline or nil,
             opponent=opponentSnapshot,opponents=opponentSnapshots,bounds=bounds,
             position=root.Position, velocity=root.AssemblyLinearVelocity,
@@ -755,6 +763,9 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
                 log("plan", {action=plan.kind, contactAt=plan.contactAt,
                     jumpAt=plan.jumpAt, diveAt=plan.diveAt,
                     margin=plan.margin,reachable=plan.reachable,role=s.role,
+                    uprightFinishOverride=plan.uprightFinishOverride,
+                    uprightFinishReason=plan.uprightFinishReason,
+                    allowUprightFinish=lastSnapshot.allowUprightFinish,
                     risk=plan.risk,riskReason=plan.riskReason,
                     requiredMargin=plan.requiredMargin,timingMargin=plan.timingMargin,
                     canJump=lastSnapshot.canJump,canDive=lastSnapshot.canDive,
@@ -1151,6 +1162,6 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
         touchedConnection:Disconnect()
         cancel()
     end
-    log("loaded",{version="2.48",nativeDive=nativeDive~=nil,nativeGrab=nativeGrabTarget~=nil})
+    log("loaded",{version="2.49",nativeDive=nativeDive~=nil,nativeGrab=nativeGrabTarget~=nil})
     return controller
 end

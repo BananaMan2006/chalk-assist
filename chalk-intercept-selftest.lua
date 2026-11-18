@@ -529,6 +529,106 @@ return function(Planner)
         local p,why=Planner.solve(s)
         check(p and not p.diveAt,why)
     end)
+    -- Anonymous numerical fixtures: no services, player identities, or live data.
+    local function finishFixture(kind)
+        local s={now=1000.115,launchAt=1000,role="WR",chase=true,allowHold=false,
+            arc={P0=Vector3.new(0,6,-53.833),P1=Vector3.new(48.106,3.5,126.359),Flight=3.1,Apex=42},
+            position=Vector3.new(7.613,3,48.338),velocity=Vector3.new(14.003,0,23.085),
+            steeringDirection=Vector3.new(.519,0,.855).Unit,grounded=true,
+            jumpSpeed=math.sqrt(2*196.2*6),gravity=196.2,walkSpeed=27,runSpeed=20,sprintSeconds=3.04,
+            groundRootY=3,turfY=0,diveTurfY=0,config=config,diveDistance=14.732,
+            canJump=true,canDive=true,reactionDelay=0,margin=.4,continuousSprint=true,
+            requireDive=true,preferGoalZ=103.306,
+            bounds={minX=-48.606,maxX=48.606,minZ=-43.512,maxZ=151.912},
+            opponent={position=Vector3.new(1000,3,1000),velocity=Vector3.zero,grounded=true,
+                jumpSpeed=math.sqrt(2*196.2*6),gravity=196.2,walkSpeed=27,runSpeed=20,
+                sprintSeconds=4,groundRootY=3,diveDistance=14.732,canJump=true,canDive=true}}
+        if kind=="leftDive" then
+            s.now,s.position,s.velocity,s.sprintSeconds=1000.087,Vector3.new(-4.409,3,35.211),Vector3.new(-13.931,0,23.129),3.12
+            s.arc.P1=Vector3.new(-48.106,3.5,118.522)
+        elseif kind=="rightDive" then
+            s.now,s.position,s.velocity,s.sprintSeconds=1000.073,Vector3.new(4.239,3,39.405),Vector3.new(13.866,0,23.168),3.08
+            s.arc.P1=Vector3.new(48.106,3.5,123.677)
+        elseif kind=="contested" then
+            s.now,s.position,s.velocity,s.sprintSeconds=1000.069,Vector3.new(-6.065,3,51.256),Vector3.new(-14.911,0,22.509),3.12
+            s.arc.P1=Vector3.new(-48.106,3.5,126.359)
+            s.defenderDeadline=1002.798
+        elseif kind=="late" then
+            s.now,s.position,s.velocity,s.sprintSeconds=1001.457,Vector3.new(23.286,3,78.735),Vector3.new(12.435,0,23.966),1.8
+        end
+        s.lookDirection,s.steeringDirection=s.velocity.Unit,s.velocity.Unit
+        s.maxHorizon=3.5-(s.now-s.launchAt)
+        return s
+    end
+    test("upright finish exception is explicit and keeps strict default",function()
+        local s=finishFixture();local strict=assert(Planner.solve(s))
+        check(strict.diveAt and not strict.uprightFinishOverride)
+        s.allowUprightFinish=false;local disabled=assert(Planner.solve(s))
+        near(disabled.contactAt,strict.contactAt);near(disabled.diveAt,strict.diveAt)
+        s.allowUprightFinish=true;local p=assert(Planner.solve(s))
+        check(not p.diveAt and not p.risk and p.uprightFinishOverride)
+        check(p.safety=="clear" and p.scoringCatch and p.firstTouchRoot.Z>=s.preferGoalZ)
+        check(p.margin>=s.margin and p.diveReason==nil,"normal catch margins/description changed")
+        check(s.requireDive and s.canDive and s.margin==.4,"caller intent or geometry mutated")
+    end)
+    test("normal contested upright finish beats artificial late dive without hiding risk",function()
+        local s=finishFixture("contested");local strict=assert(Planner.solve(s))
+        s.allowUprightFinish=true;local p,why,threat=Planner.solve(s)
+        check(p and not p.diveAt and p.uprightFinishOverride and not p.risk,why)
+        check(p.contactAt<strict.contactAt-.06 and p.firstTouchAt<strict.firstTouchAt-.1)
+        check(p.safety=="contested" and p.margin>=s.margin)
+        check(p.defenderDeadline==s.defenderDeadline and threat.defenderDeadline==s.defenderDeadline)
+        check(p.firstTouchAt>s.defenderDeadline,"fixture must remain an estimated lost race")
+    end)
+    test("upright finish keeps dives that have no normal upright goal witness",function()
+        for _,kind in ipairs({"leftDive","rightDive"}) do
+            local s=finishFixture(kind);local strict=assert(Planner.solve(s))
+            s.allowUprightFinish=true;local p=assert(Planner.solve(s))
+            check(p.diveAt and not p.uprightFinishOverride and not p.risk)
+            near(p.contactAt,strict.contactAt);near(p.diveAt,strict.diveAt)
+        end
+    end)
+    test("upright finish cannot replace a normal dive with late weak upright contact",function()
+        local s=finishFixture("late");s.allowUprightFinish=true
+        local p=assert(Planner.solve(s))
+        check(p.diveAt and not p.uprightFinishOverride and not p.risk)
+        s.requireDive,s.canDive=false,false
+        local weak=assert(Planner.solve(s))
+        check(weak.risk=="last-resort","fixture must exercise excluded weak upright contact")
+    end)
+    test("upright finish still requires known coverage and a finite scoring goal",function()
+        for _,reason in ipairs({"unknown","missing","unreachable","invalid"}) do
+            local s=finishFixture();s.allowUprightFinish=true
+            if reason=="unknown" then s.opponent=nil
+            elseif reason=="missing" then s.preferGoalZ=nil
+            elseif reason=="unreachable" then s.preferGoalZ=200
+            else s.preferGoalZ=math.huge end
+            local p=Planner.solve(s)
+            check(not p or p.diveAt and not p.uprightFinishOverride,reason.." gained an upright exception")
+        end
+    end)
+    test("upright finish preserves field bounds and exhausted sprint budget",function()
+        local s=finishFixture();s.allowUprightFinish=true;s.bounds.maxZ=103
+        local p=Planner.solve(s)
+        check(not p or not p.uprightFinishOverride,"goal outside field was accepted")
+        s=finishFixture();s.allowUprightFinish=true;s.walkSpeed,s.sprintSeconds=20,0
+        p=Planner.solve(s)
+        check(not p or not p.uprightFinishOverride,"exhausted sprint was invented")
+        s=finishFixture();s.allowUprightFinish=true;p=assert(Planner.solve(s))
+        local touch=Planner.firstTouch(s,p)
+        check(touch.root.X>=s.bounds.minX and touch.root.X<=s.bounds.maxX
+            and touch.root.Z>=s.bounds.minZ and touch.root.Z<=s.bounds.maxZ)
+    end)
+    test("upright finish flag leaves DB and ordinary WR selection unchanged",function()
+        for _,role in ipairs({"DB","WR"}) do
+            local s=finishFixture();s.role=role
+            if role=="WR" then s.requireDive=false end
+            local before=assert(Planner.solve(s));s.allowUprightFinish=true
+            local after=assert(Planner.solve(s))
+            check(before.kind==after.kind and not after.uprightFinishOverride)
+            near(before.contactAt,after.contactAt)
+        end
+    end)
     -- Informational benchmark only; no timing-dependent pass/fail threshold.
     do
         local s=snapshot()

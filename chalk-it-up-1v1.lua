@@ -146,7 +146,7 @@ local function auditMatch(kind,data)
             end
         end
         appendfile("ciu_match_audit.jsonl",game:GetService("HttpService"):JSONEncode({
-            kind=kind,version="2.48",time=workspace:GetServerTimeNow(),jobId=game.JobId,
+            kind=kind,version="2.49",time=workspace:GetServerTimeNow(),jobId=game.JobId,
             selectedQueue=state and state.selectedMode,phase=phase,role=role,
             fullAuto=fullAutoState,
             fields=fields,rankAttributes=observedRank()})..string.char(10))
@@ -979,7 +979,7 @@ end
 function api.status()
     local ch = characterOf(opponent)
     local holder,isEnemy,holderRole=carrierContext()
-    return {version="2.48", enabled=enabled, role=role or "unknown",rawRole=rawRole or "unknown", phase=phase,
+    return {version="2.49", enabled=enabled, role=role or "unknown",rawRole=rawRole or "unknown", phase=phase,
         ui={visible=windowVisible,minimized=minimized,x=panel.Position.X.Offset,y=panel.Position.Y.Offset},
         matchAlerts={enabled=alertSettings.enabled,saveError=alertSettings.saveError},
         idleGuard=idleGuard and idleGuard.status() or nil,
@@ -1603,6 +1603,7 @@ function Planner.solve(s)
     local wr=s.role=="WR"
     local requireDive=wr and s.requireDive==true
     local scoringIntent=wr and finite(s.preferGoalZ)
+    local uprightFinish=requireDive and scoringIntent and s.allowUprightFinish==true
     local defenderAt,defenderKnown,observedDefenderAt
     local retainedDeadline=wr and finite(s.defenderDeadline)
         and s.defenderDeadline>=s.launchAt+0.12 and s.defenderDeadline or nil
@@ -1638,6 +1639,15 @@ function Planner.solve(s)
         end
     end
     local function consider(p,t)
+        -- The explicit finish exception still needs normal contact and known
+        -- coverage. Contested options retain the ordinary action/time ranking.
+        if uprightFinish and not p.diveAt and (relaxed or not defenderKnown) then return end
+        -- This is the same >60 ms advantage test used below, before the
+        -- expensive native contact scan. Clear diving catches remain eligible.
+        if uprightFinish and p.diveAt and best and not best.diveAt
+            and best.safety=="contested" and defenderAt
+            and s.now+t+(s.contestBuffer or 0.08)>=defenderAt
+            and best.contactAt-(s.now+t)<=0.06 then return end
         local candidate,missMargin=contact(s,p,t,relaxed and 0.05 or nil,
             relaxed and 0.004 or nil)
         if not candidate then
@@ -1690,7 +1700,13 @@ function Planner.solve(s)
             if tier==bestTier and not contested and s.arc.P1.Z>=s.arc.P0.Z
                 and candidate.contactPosition.Z<bestProgress-0.03 then return end
             local touch=intentTouch or Planner.firstTouch(s,candidate)
-            if requireDive and (not candidate.diveAt or touch.at<candidate.diveAt+.03) then return end
+            if requireDive and (not candidate.diveAt or touch.at<candidate.diveAt+.03) then
+                if not (uprightFinish and not candidate.diveAt and not relaxed
+                    and defenderKnown and (contested or scoringCatch)) then return end
+                candidate.uprightFinishOverride=true
+                candidate.uprightFinishReason=contested and "Earlier normal contested upright catch"
+                    or "Normal clear upright goal catch"
+            end
             if not inBounds(s,touch.root) then return end
             local better=tier<bestTier or not best
             if not better and tier==bestTier then
@@ -1829,11 +1845,12 @@ function Planner.solve(s)
       end
     end
     if s.role=="WR" then
-        if not requireDive then search(true,false) end
+        if not requireDive or uprightFinish then search(true,false) end
         -- Ordinary WR assistance remains upright-first. A submitted deep
         -- scoring route may use a clear diving goal-line catch over a shorter
         -- upright catch; contested deep windows never outrank clear catches.
-        if requireDive or not best or scoringIntent and not best.scoringCatch and best.safety~="contested" then
+        if (requireDive and not (uprightFinish and best and best.safety=="clear" and best.scoringCatch))
+            or not best or scoringIntent and not best.scoringCatch and best.safety~="contested" then
             search(false,true)
             if best and best.diveAt then
                 best.diveReason=scoringIntent and "Timed full-auto deep catch" or "No reachable upright catch"
@@ -1842,7 +1859,7 @@ function Planner.solve(s)
         if scoringIntent and best and best.diveAt then
             best.diveReason="Timed full-auto deep catch"
         end
-        if requireDive and best then best.diveReason="Planned sideline dive finish" end
+        if requireDive and best and best.diveAt then best.diveReason="Planned sideline dive finish" end
     else
         search(true,true)
     end
@@ -1916,7 +1933,7 @@ function Planner.solve(s)
         best.riskReason="Only a narrow native contact window remains"
         best.searchRefinement="Bounded last-resort native contact search"
     end
-    if best and requireDive then best.diveReason="Planned sideline dive finish" end
+    if best and requireDive and best.diveAt then best.diveReason="Planned sideline dive finish" end
     local threat
     if wr then
         local committed=retainedDeadline and defenderAt or nil
@@ -3355,7 +3372,7 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
         fields = fields or {}
         if fields.defenderAt==math.huge or fields.defenderAt==-math.huge then fields.defenderAt=nil end
         fields.kind, fields.time = kind, workspace:GetServerTimeNow()
-        fields.version="2.48"
+        fields.version="2.49"
         fields.launchAt=fields.launchAt or throwKey
         table.insert(history, fields)
         if #history > 80 then table.remove(history, 1) end
@@ -3510,14 +3527,22 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
                 if item then table.insert(opponentSnapshots,item) end
             end
         end
+        local finishGoal
+        if s.role=="WR" and s.catchIntent and s.catchIntent.deepFinish==true then
+            local goal=s.catchIntent.goalZ
+            if type(goal)=="number" and goal==goal and math.abs(goal)<math.huge then
+                finishGoal=goal+(s.offset and s.offset.Z or 0)
+            end
+        end
         return {now=now, arc=s.arc, launchAt=s.launchAt,role=s.role,
             continuousApproach=s.role=="WR" and s.catchIntent and s.catchIntent.deepFinish==true
                 and s.catchIntent.continuousSprint~=true,
             continuousSprint=s.role=="WR" and s.catchIntent and s.catchIntent.continuousSprint==true,
             requireDive=s.role=="WR" and s.catchIntent and s.catchIntent.requireDive==true,
+            allowUprightFinish=s.playBudget~=nil and finishGoal~=nil
+                and s.catchIntent.requireDive==true,
             sprintReserve=budget.reserve,
-            preferGoalZ=s.role=="WR" and s.catchIntent and s.catchIntent.deepFinish
-                and s.catchIntent.goalZ+(s.offset and s.offset.Z or 0) or nil,
+            preferGoalZ=finishGoal,
             defenderDeadline=s.role=="WR" and wrDefenderDeadline or nil,
             opponent=opponentSnapshot,opponents=opponentSnapshots,bounds=bounds,
             position=root.Position, velocity=root.AssemblyLinearVelocity,
@@ -3996,6 +4021,9 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
                 log("plan", {action=plan.kind, contactAt=plan.contactAt,
                     jumpAt=plan.jumpAt, diveAt=plan.diveAt,
                     margin=plan.margin,reachable=plan.reachable,role=s.role,
+                    uprightFinishOverride=plan.uprightFinishOverride,
+                    uprightFinishReason=plan.uprightFinishReason,
+                    allowUprightFinish=lastSnapshot.allowUprightFinish,
                     risk=plan.risk,riskReason=plan.riskReason,
                     requiredMargin=plan.requiredMargin,timingMargin=plan.timingMargin,
                     canJump=lastSnapshot.canJump,canDive=lastSnapshot.canDive,
@@ -4392,7 +4420,7 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
         touchedConnection:Disconnect()
         cancel()
     end
-    log("loaded",{version="2.48",nativeDive=nativeDive~=nil,nativeGrab=nativeGrabTarget~=nil})
+    log("loaded",{version="2.49",nativeDive=nativeDive~=nil,nativeGrab=nativeGrabTarget~=nil})
     return controller
 end
 
@@ -6051,6 +6079,12 @@ function Policy.movement(input,Config,Field,RouteMath)
         -- Give the receiver room for the opening .8 seconds. Then walk the
         -- desired trail toward .75 yards by 2.3 seconds. The opening walking
         -- target is two yards shallow, with a one-to-three-yard free band.
+        local lossBias=bias
+        local patternShade=clamp(finite(profile.deepAttemptShadeYards) and profile.deepAttemptShadeYards or 0,0,0.75)*yd
+        -- Confirmed deep attempts can start walking with the receiver earlier.
+        -- This does not deepen setup, widen the existing goal-side hold band,
+        -- or spend sprint sooner. It is a floor, never an added spacing offset.
+        bias=math.max(lossBias,patternShade)
         local geometricOpening=clamp(((goal-observed.Z)/yd-8)/8,0,1)
         local opening=geometricOpening
         if phase=="Live" and finite(input.elapsed) then
@@ -6062,7 +6096,7 @@ function Policy.movement(input,Config,Field,RouteMath)
         -- Moving the desired walking target is not a new sprint emergency.
         -- Keep sprint thresholds on the original geometric spacing, including
         -- its learned bias and existing near-goal floor.
-        local sprintMinDepth=(-.75-3.25*geometricOpening)*yd+bias
+        local sprintMinDepth=(-.75-3.25*geometricOpening)*yd+lossBias
             -(.75+.25*geometricOpening)*yd
         if nearGoal then
             minDepth=math.max(minDepth,-.5*yd)
@@ -6074,7 +6108,7 @@ function Policy.movement(input,Config,Field,RouteMath)
         -- Once play starts, retain a nearby goal-side position. Do not erase
         -- the legal opening cushion by walking backward through a stationary
         -- receiver or a velocity sample that has not arrived yet.
-        local holdDepth=3*yd+bias
+        local holdDepth=3*yd+lossBias
         if finite(input.elapsed) and input.elapsed>=0 and input.elapsed<.4 then
             local los=(finite(input.LOS) and input.LOS
                 or finite(Field.LOSZ) and Field.LOSZ or observed.Z-offset.Z)+offset.Z
@@ -6201,7 +6235,7 @@ return function(ctx,Policy,services)
     local api={}
     local function log(kind,data)
         if type(append)~="function" then return end
-        data=data or {};data.kind=kind;data.time=world:GetServerTimeNow();data.version="2.48"
+        data=data or {};data.kind=kind;data.time=world:GetServerTimeNow();data.version="2.49"
         pcall(function() append("ciu_fullplay_events.jsonl",http:JSONEncode(data)..string.char(10)) end)
     end
     local function pauseReason(s)
@@ -6224,7 +6258,7 @@ return function(ctx,Policy,services)
         local out={}
         for _,key in ipairs({"pass","side","depth","shape","family","signature","success",
             "contested","result","time","roundKey","arrival","catchSuccess",
-            "terminalResult","terminalAt","cutCount","lastCutAt","experimentalAttempt",
+            "terminalResult","terminalAt","terminalPointLost","cutCount","lastCutAt","experimentalAttempt",
             "trialTrigger","experimentalClearanceGap","middleStemDeep","stemYards","cutLeadTime",
             "finishMode","estimatedFinishAt","estimatedFinishZ","finishReachable","finishDistance",
             "finishTravelTime","finishReserve","finishFraction","routeStrategy","slowStem",
@@ -6285,7 +6319,18 @@ return function(ctx,Policy,services)
                 bias=math.max(0,bias-.5)
             end
         end
-        return {depthBiasYards=bias,samples=#recentDefense,deepFloaterLosses=losses}
+        local attempts=0
+        for i=math.max(1,#recentDefense-2),#recentDefense do
+            local item=recentDefense[i]
+            if item.pass=="Floater" and item.deepEndzone then attempts=attempts+1 end
+        end
+        local latest=recentDefense[#recentDefense]
+        -- Repeated observed deep throws describe the opponent's current play
+        -- selection even when stopped. A newly short pass removes this shade;
+        -- the separate outcome-based learning above remains unchanged.
+        local shortLatest=latest and latest.targetDepthYards<8
+        return {depthBiasYards=bias,samples=#recentDefense,deepFloaterLosses=losses,
+            recentDeepAttempts=attempts,deepAttemptShadeYards=attempts>=2 and not shortLatest and 0.75 or 0}
     end
     local function validId(value)
         return type(value)=="number" and value==value and value>0 and value<math.huge
@@ -6468,6 +6513,7 @@ return function(ctx,Policy,services)
         log("defenseOutcome",{pass=item.pass,result=result,opponentCaught=item.opponentCaught,
             deepEndzone=item.deepEndzone,depthAtThrow=item.depthAtThrow,targetDepthYards=item.targetDepthYards,
             goalDistanceYards=item.goalDistanceYards,depthBiasYards=profile.depthBiasYards,
+            deepAttemptShadeYards=profile.deepAttemptShadeYards,recentDeepAttempts=profile.recentDeepAttempts,
             samples=profile.samples,playKey=item.playKey})
     end
     local function enemyCaught(s,catcher)
@@ -6704,6 +6750,7 @@ return function(ctx,Policy,services)
                 opponentDistance=opponent and ((opponent-root.Position)*Vector3.new(1,0,1)).Magnitude,
                 stamina=input.stamina,laneSide=laneSide,speed=h.WalkSpeed,moving=moving,
                 routeWaypoint=choice.routeWaypoint,defenseDepthBiasYards=input.defenseProfile.depthBiasYards,
+                defenseAttemptShadeYards=input.defenseProfile.deepAttemptShadeYards,
                 defenseSamples=input.defenseProfile.samples,routeMoveSpeed=choice.moveSpeed,
                 routeDeadline=choice.routeDeadline,finalSprintCommitted=finalSprintCommitted})
         end
@@ -6764,15 +6811,19 @@ return function(ctx,Policy,services)
         if s.role=="WR" and (s.mode==nil or s.mode=="1v1") and not s.testing and data.Phase=="Result"
             and data.Result=="Tackled" then
             local key=tostring(s.preSnapEnds or roundKey or "current")
-            -- The offense objective is a touchdown on this down. Any own-WR
-            -- tackle misses it, even when the first down awards no point.
-            -- Preserve possession evidence and revise one same-round record.
+            -- An adaptive underneath/slant catch may deliberately advance the
+            -- next down. Keep that progress separate from a lost point; a
+            -- later duplicate without Point must never erase a confirmed loss.
             if activeRoute and activeRoute.roundKey==key then recordOutcome("Catch",true) end
             for i=#recentRoutes,1,-1 do
                 local item=recentRoutes[i]
                 if item.roundKey==key and (item.catchSuccess==true or item.result=="Catch" and item.success) then
-                    if item.terminalResult~="Tackled" or item.success~=false then
-                        item.catchSuccess=true;item.success=false
+                    local pointLost=item.terminalPointLost==true or data.Point=="Opp"
+                        or data.Point=="Them" or data.ScorerIsYou==false
+                    local progress=(item.adaptiveUnderneath==true or item.pacedSlant==true) and not pointLost
+                    if item.terminalResult~="Tackled" or item.success~=progress
+                        or item.terminalPointLost~=pointLost then
+                        item.catchSuccess=true;item.success=progress;item.terminalPointLost=pointLost
                         item.terminalResult="Tackled";item.terminalAt=world:GetServerTimeNow()
                         saveMemory()
                         log("routeOutcomeUpdated",descriptor(item))
@@ -7437,4 +7488,4 @@ if type(writefile)=="function" then
         end
     end)
 end
-print("Chalk Assist 2.48 loaded. Full Auto preserves defensive stamina and varies legal routes. Idle protection runs automatically. Drag / minimize / Right Shift hide. V assist / B all / F8 unload.")
+print("Chalk Assist 2.49 loaded. Full Auto preserves defensive stamina and varies legal routes. Idle protection runs automatically. Drag / minimize / Right Shift hide. V assist / B all / F8 unload.")
