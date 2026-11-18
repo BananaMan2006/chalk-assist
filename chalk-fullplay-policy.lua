@@ -867,6 +867,12 @@ function Policy.movement(input,Config,Field,RouteMath)
         if phase=="Live" and velocity.Z>2 and observedDepth<preferred+.75*yd then
             targetZ=math.max(targetZ,observed.Z+preferred+velocity.Z*.25)
         end
+        -- Once the WR is visibly advancing and we are already level or
+        -- trailing, do not run backward merely to create the opening cushion.
+        -- Walk with that progress; the existing sprint thresholds still apply.
+        if phase=="Live" and velocity.Z>Config.RunSpeed*.5 and observedDepth<=0 then
+            targetZ=math.max(targetZ,position.Z+velocity.Z*.25)
+        end
         -- A retreating receiver is leaving the goal. Do not walk farther
         -- downfield merely to restore the goal-side guard during that retreat.
         if phase=="Live" and nearGoal and velocity.Z < -2 then

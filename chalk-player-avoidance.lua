@@ -146,10 +146,21 @@ function Avoidance.update(previous,input)
     if not threat and not blocked then
         local old=state.active and state.heading or nil
         if vec(old) and old.Magnitude>.001 and old:Dot(heading)<.9999 then
-            local returning=turn(old.Unit,heading,turnRate*dt,state.side)
-            state.heading,state.active=returning,true
             state.clearSince=state.clearSince or now
             local amount=speed>0 and strength*walkSpeed/speed or strength
+            -- A single clear frame near the capsule boundary is not an exit.
+            -- Retain the checked passing heading briefly so alternating clear/
+            -- threatened frames cannot reverse the turn on every heartbeat.
+            if now-state.clearSince<.12 then
+                local safe=evaluate(old.Unit,speed*amount)
+                if safe then
+                    state.heading,state.active=old.Unit,true
+                    return state,decision(old.Unit*amount,false,true,false,"holding passing side",
+                        {side=state.side,progressSpeed=measured})
+                end
+            end
+            local returning=turn(old.Unit,heading,turnRate*dt,state.side)
+            state.heading,state.active=returning,true
             local safeAmount=0
             for _,fraction in ipairs({1,.75,.5,.25,.125}) do
                 local safe=evaluate(returning,speed*amount*fraction)

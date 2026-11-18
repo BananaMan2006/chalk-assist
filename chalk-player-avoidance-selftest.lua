@@ -88,6 +88,44 @@ return function(Avoidance)
             assert(d.active and state.side==side)
         end
     end)
+    test("oscillating clearance boundary cannot alternate bypass and return headings every frame",function()
+        local bypass=Vector3.new(-math.sin(math.rad(35)),0,math.cos(math.rad(35)))
+        local p=fixture({walkSpeed=20,currentDirection=bypass})
+        local state={active=true,side=-1,heading=bypass}
+        for i=1,12 do
+            p.now=i*.025
+            -- Direct-path clearance crosses the3.75stud capsule boundary;
+            -- the already chosen left bypass remains physically clear.
+            p.opponents={{position=Vector3.new(i%2==1 and 3.8 or 3.7,0,4),velocity=Vector3.zero}}
+            local d;state,d=Avoidance.update(state,p)
+            same(state.heading,bypass)
+            assert(d.active and not d.sprint and state.side==-1)
+            p.currentDirection=state.heading
+        end
+        p.opponents={{position=Vector3.new(3.8,0,4),velocity=Vector3.zero}}
+        for i=1,5 do
+            p.now=.3+i*.025
+            local d;state,d=Avoidance.update(state,p)
+            same(state.heading,bypass);assert(d.reason=="holding passing side")
+            p.currentDirection=state.heading
+        end
+        p.now=.45
+        local d;state,d=Avoidance.update(state,p)
+        assert(d.reason=="returning to path" and state.heading.X>bypass.X)
+        for _=1,12 do
+            p.now=p.now+.025;p.currentDirection=state.heading
+            state,d=Avoidance.update(state,p)
+        end
+        assert(not d.active and d.sprint);same(d.direction,p.desiredDirection)
+    end)
+    test("release hysteresis never holds an old bypass into a sideline",function()
+        local p=fixture({now=.05,position=Vector3.new(9.5,0,0),
+            bounds={minX=-10,maxX=10,minZ=-10,maxZ=30},currentDirection=Vector3.new(1,0,0)})
+        local state={active=true,heading=Vector3.new(1,0,0),side=1,clearSince=.04}
+        local _,d=Avoidance.update(state,p)
+        assert(d.reason~="holding passing side","hysteresis overrode the bounds check")
+        legal(p,d.direction)
+    end)
     test("sideline bypass selects the open side and remains bounded",function()
         local p=fixture({bounds={minX=-20,maxX=2,minZ=-20,maxZ=30},
             opponents={{position=Vector3.new(0,0,5),velocity=Vector3.zero}}})

@@ -146,7 +146,7 @@ local function auditMatch(kind,data)
             end
         end
         appendfile("ciu_match_audit.jsonl",game:GetService("HttpService"):JSONEncode({
-            kind=kind,version="2.43",time=workspace:GetServerTimeNow(),jobId=game.JobId,
+            kind=kind,version="2.44",time=workspace:GetServerTimeNow(),jobId=game.JobId,
             selectedQueue=state and state.selectedMode,phase=phase,role=role,
             fullAuto=fullAutoState,
             fields=fields,rankAttributes=observedRank()})..string.char(10))
@@ -979,7 +979,7 @@ end
 function api.status()
     local ch = characterOf(opponent)
     local holder,isEnemy,holderRole=carrierContext()
-    return {version="2.43", enabled=enabled, role=role or "unknown",rawRole=rawRole or "unknown", phase=phase,
+    return {version="2.44", enabled=enabled, role=role or "unknown",rawRole=rawRole or "unknown", phase=phase,
         ui={visible=windowVisible,minimized=minimized,x=panel.Position.X.Offset,y=panel.Position.Y.Offset},
         matchAlerts={enabled=alertSettings.enabled,saveError=alertSettings.saveError},
         idleGuard=idleGuard and idleGuard.status() or nil,
@@ -2903,10 +2903,21 @@ function Avoidance.update(previous,input)
     if not threat and not blocked then
         local old=state.active and state.heading or nil
         if vec(old) and old.Magnitude>.001 and old:Dot(heading)<.9999 then
-            local returning=turn(old.Unit,heading,turnRate*dt,state.side)
-            state.heading,state.active=returning,true
             state.clearSince=state.clearSince or now
             local amount=speed>0 and strength*walkSpeed/speed or strength
+            -- A single clear frame near the capsule boundary is not an exit.
+            -- Retain the checked passing heading briefly so alternating clear/
+            -- threatened frames cannot reverse the turn on every heartbeat.
+            if now-state.clearSince<.12 then
+                local safe=evaluate(old.Unit,speed*amount)
+                if safe then
+                    state.heading,state.active=old.Unit,true
+                    return state,decision(old.Unit*amount,false,true,false,"holding passing side",
+                        {side=state.side,progressSpeed=measured})
+                end
+            end
+            local returning=turn(old.Unit,heading,turnRate*dt,state.side)
+            state.heading,state.active=returning,true
             local safeAmount=0
             for _,fraction in ipairs({1,.75,.5,.25,.125}) do
                 local safe=evaluate(returning,speed*amount*fraction)
@@ -3304,7 +3315,7 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
         fields = fields or {}
         if fields.defenderAt==math.huge or fields.defenderAt==-math.huge then fields.defenderAt=nil end
         fields.kind, fields.time = kind, workspace:GetServerTimeNow()
-        fields.version="2.43"
+        fields.version="2.44"
         fields.launchAt=fields.launchAt or throwKey
         table.insert(history, fields)
         if #history > 80 then table.remove(history, 1) end
@@ -4308,7 +4319,7 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
         touchedConnection:Disconnect()
         cancel()
     end
-    log("loaded",{version="2.43",nativeDive=nativeDive~=nil,nativeGrab=nativeGrabTarget~=nil})
+    log("loaded",{version="2.44",nativeDive=nativeDive~=nil,nativeGrab=nativeGrabTarget~=nil})
     return controller
 end
 
@@ -5868,6 +5879,12 @@ function Policy.movement(input,Config,Field,RouteMath)
         if phase=="Live" and velocity.Z>2 and observedDepth<preferred+.75*yd then
             targetZ=math.max(targetZ,observed.Z+preferred+velocity.Z*.25)
         end
+        -- Once the WR is visibly advancing and we are already level or
+        -- trailing, do not run backward merely to create the opening cushion.
+        -- Walk with that progress; the existing sprint thresholds still apply.
+        if phase=="Live" and velocity.Z>Config.RunSpeed*.5 and observedDepth<=0 then
+            targetZ=math.max(targetZ,position.Z+velocity.Z*.25)
+        end
         -- A retreating receiver is leaving the goal. Do not walk farther
         -- downfield merely to restore the goal-side guard during that retreat.
         if phase=="Live" and nearGoal and velocity.Z < -2 then
@@ -5949,7 +5966,7 @@ return function(ctx,Policy,services)
     local api={}
     local function log(kind,data)
         if type(append)~="function" then return end
-        data=data or {};data.kind=kind;data.time=world:GetServerTimeNow();data.version="2.43"
+        data=data or {};data.kind=kind;data.time=world:GetServerTimeNow();data.version="2.44"
         pcall(function() append("ciu_fullplay_events.jsonl",http:JSONEncode(data)..string.char(10)) end)
     end
     local function pauseReason(s)
@@ -7158,4 +7175,4 @@ if type(writefile)=="function" then
         end
     end)
 end
-print("Chalk Assist 2.43 loaded. Full Auto preserves defensive stamina and varies legal routes. Idle protection runs automatically. Drag / minimize / Right Shift hide. V assist / B all / F8 unload.")
+print("Chalk Assist 2.44 loaded. Full Auto preserves defensive stamina and varies legal routes. Idle protection runs automatically. Drag / minimize / Right Shift hide. V assist / B all / F8 unload.")

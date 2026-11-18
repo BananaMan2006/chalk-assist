@@ -814,6 +814,67 @@ return function(Policy,create,routeSource,policySource)
             end
         end
     end)
+    test("DB advancing receiver does not manufacture more trail from level or shallow position",function()
+        for _,gap in ipairs({0,-.25,-1,-2,-4}) do
+            for _,speed in ipairs({10.01,20,27}) do
+                local p=input({role="DB",phase="Live",position=Vector3.new(0,3,30+gap*Field.YD),
+                    opponentPosition=Vector3.new(0,3,30),opponentVelocity=Vector3.new(0,0,speed),
+                    elapsed=.2,stamina=100})
+                local d=move(p)
+                assert(d.target.Z>p.position.Z+d.stopDistance,
+                    "opening cushion sent an already-shallow DB backward or left it stationary")
+                assert(not d.sprint,"walking with ordinary progress requested sprint")
+            end
+        end
+    end)
+    test("DB forward-progress guard preserves presnap stationary retreat and ahead boundaries",function()
+        local p=input({role="DB",phase="Live",position=Vector3.new(0,3,30),
+            opponentPosition=Vector3.new(0,3,30),elapsed=.2,stamina=100})
+        for _,speed in ipairs({-20,0,2,10}) do
+            p.opponentVelocity=Vector3.new(0,0,speed)
+            local d=move(p)
+            near(d.target.Z,30-4*Field.YD);assert(not d.sprint)
+        end
+        p.opponentVelocity=Vector3.new(0,0,20);p.phase="PreSnap"
+        near(move(p).target.Z,30-4*Field.YD)
+        p.phase="Live";p.position=Vector3.new(0,3,30.01)
+        near(move(p).target.Z,30-4*Field.YD)
+        p.position=Vector3.new(0,3,30)
+        assert(move(p).target.Z>p.position.Z)
+    end)
+    test("DB recorded opening retreat is corrected symmetrically and under field offset",function()
+        local f,r=pressureFixture()
+        for _,side in ipairs({-1,1}) do
+            local p=input({role="DB",phase="Live",position=Vector3.new(f.MidX+side*2,4.636868,-23.407),
+                opponentPosition=Vector3.new(f.MidX+side*4,4.636868,-19.786),
+                opponentVelocity=Vector3.new(side*1,0,17.22),elapsed=.17,stamina=100,
+                defenseProfile={depthBiasYards=1.25}})
+            local d=Policy.movement(p,Config,f,r)
+            assert(d.target.Z>p.position.Z+d.stopDistance and not d.sprint,
+                "recorded 4882.894 advancing receiver still causes an opening retreat")
+            near(d.target.X,p.position.X)
+            local offset=Vector3.new(200,0,-300)
+            p.offset=offset;p.position=p.position+offset;p.opponentPosition=p.opponentPosition+offset
+            local shifted=Policy.movement(p,Config,f,r)
+            near(shifted.target.X,d.target.X+offset.X);near(shifted.target.Z,d.target.Z+offset.Z)
+            assert(shifted.sprint==d.sprint)
+        end
+    end)
+    test("DB forward progress retains near-goal cap and native sprint reserve thresholds",function()
+        local p=input({role="DB",phase="Live",position=Vector3.new(0,3,105),
+            opponentPosition=Vector3.new(0,3,110),opponentVelocity=Vector3.new(0,0,20),
+            elapsed=.2,stamina=75})
+        local urgent=move(p);assert(urgent.sprint and urgent.target.Z>p.position.Z)
+        for _,stamina in ipairs({0,40,43,59,60}) do
+            p.stamina=stamina;p.sprintOn=true
+            local d=move(p);assert(not d.sprint and d.target.Z>p.position.Z)
+        end
+        p.position=Vector3.new(0,3,122);p.opponentPosition=Vector3.new(0,3,125)
+        local capped=move(p);assert(capped.target.Z<=Field.GoalZ+Field.YD)
+        p.position=Vector3.new(0,3,105);p.opponentPosition=Vector3.new(0,3,110)
+        p.opponentVelocity=Vector3.new(0,0,-20)
+        assert(move(p).target.Z<=p.position.Z and not move(p).sprint)
+    end)
     test("DB time taper preserves opening space then walks closer without inventing sprint urgency",function()
         local p=input({role="DB",phase="Live",position=Vector3.new(0,3,18),
             opponentPosition=Vector3.new(0,3,30),opponentVelocity=Vector3.new(0,0,20),
