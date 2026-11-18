@@ -146,7 +146,7 @@ local function auditMatch(kind,data)
             end
         end
         appendfile("ciu_match_audit.jsonl",game:GetService("HttpService"):JSONEncode({
-            kind=kind,version="2.46",time=workspace:GetServerTimeNow(),jobId=game.JobId,
+            kind=kind,version="2.47",time=workspace:GetServerTimeNow(),jobId=game.JobId,
             selectedQueue=state and state.selectedMode,phase=phase,role=role,
             fullAuto=fullAutoState,
             fields=fields,rankAttributes=observedRank()})..string.char(10))
@@ -979,7 +979,7 @@ end
 function api.status()
     local ch = characterOf(opponent)
     local holder,isEnemy,holderRole=carrierContext()
-    return {version="2.46", enabled=enabled, role=role or "unknown",rawRole=rawRole or "unknown", phase=phase,
+    return {version="2.47", enabled=enabled, role=role or "unknown",rawRole=rawRole or "unknown", phase=phase,
         ui={visible=windowVisible,minimized=minimized,x=panel.Position.X.Offset,y=panel.Position.Y.Offset},
         matchAlerts={enabled=alertSettings.enabled,saveError=alertSettings.saveError},
         idleGuard=idleGuard and idleGuard.status() or nil,
@@ -1888,6 +1888,10 @@ function Planner.solve(s)
         relaxed,refining=true,true
         if not requireDive then search(true,false) end
         if not best and not requireDive then refine(true,false,false) end
+        -- A normal-age jump-dive can miss only the robustness buffer. Keep
+        -- those action ages in the bounded near-miss retry before considering
+        -- longer descent dives; otherwise a valid narrow witness is omitted.
+        if not best and canDive then refine(false,true,false) end
         if not best and canDive then refine(false,true,true) end
         if best and best.diveAt then best.diveReason="No normal or last-resort upright catch" end
     end
@@ -3350,7 +3354,7 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
         fields = fields or {}
         if fields.defenderAt==math.huge or fields.defenderAt==-math.huge then fields.defenderAt=nil end
         fields.kind, fields.time = kind, workspace:GetServerTimeNow()
-        fields.version="2.46"
+        fields.version="2.47"
         fields.launchAt=fields.launchAt or throwKey
         table.insert(history, fields)
         if #history > 80 then table.remove(history, 1) end
@@ -4357,7 +4361,7 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
         touchedConnection:Disconnect()
         cancel()
     end
-    log("loaded",{version="2.46",nativeDive=nativeDive~=nil,nativeGrab=nativeGrabTarget~=nil})
+    log("loaded",{version="2.47",nativeDive=nativeDive~=nil,nativeGrab=nativeGrabTarget~=nil})
     return controller
 end
 
@@ -5811,9 +5815,26 @@ function Policy.movement(input,Config,Field,RouteMath)
             -- The native throw clock keeps running through a jam or detour.
             -- At the selected cut time, take the final diagonal from here;
             -- walking to a missed stem waypoint spends the catch window.
-            -- This starts no earlier than the route's budgeted sprint time.
             local finalSprint=slowStem and (input.finalSprintCommitted==true
                 or input.elapsed>=input.slowStemTime)
+            if slowStem and not finalSprint and index==2 and finite(plan.Arrival) then
+                local remaining=input.slowStemTime-input.elapsed
+                local stem=worldPoint(plan.Points[2],offset,position.Y)
+                local origin=worldPoint(plan.Points[1],offset,position.Y)
+                local axis=(stem-origin)*FLAT
+                local run=math.max(1,Config.RunSpeed)
+                local drain=finite(Config.SprintDrain) and math.max(.01,Config.SprintDrain) or 25
+                local stamina=finite(input.stamina) and math.max(0,input.stamina) or 0
+                -- Recover only a small, measured delay. Current stamina must
+                -- fund uninterrupted sprint through native arrival plus the
+                -- same .12-second dispatch allowance, with ten left over.
+                local behind=axis.Magnitude>.01 and ((position-stem)*FLAT):Dot(axis.Unit)<-1.5
+                    and flatDistance(position,stem)>run*remaining+run*.12+1.5
+                if remaining>0 and remaining<=.21 and behind and plan.Arrival>=input.elapsed
+                    and stamina-(plan.Arrival-input.elapsed+.12)*drain>=10 then
+                    finalSprint=true
+                end
+            end
             if finalSprint then index=math.max(3,index) end
             local target,previous,delta,inbound,distance,deadline
             local function measure()
@@ -5877,6 +5898,24 @@ function Policy.movement(input,Config,Field,RouteMath)
         local nearGoal=goal-observed.Z<=6*yd
         local profile=type(input.defenseProfile)=="table" and input.defenseProfile or {}
         local bias=clamp(finite(profile.depthBiasYards) and profile.depthBiasYards or 0,0,2.5)*yd
+        if phase=="PreSnap" then
+            -- Start on the goal side of the receiver and line of scrimmage.
+            -- The old shallow target drove into the receiver/line before hike.
+            -- Leave a free band so small receiver movements do not cause press.
+            local los=(finite(input.LOS) and input.LOS
+                or finite(Field.LOSZ) and Field.LOSZ or observed.Z-offset.Z)+offset.Z
+            local base=math.max(observed.Z,los)
+            local targetZ=position.Z
+            if targetZ<base+yd+bias or targetZ>base+3*yd+bias then
+                targetZ=base+2*yd+bias
+            end
+            local lateralDelta=position.X-observed.X
+            local targetX=position.X
+            if math.abs(lateralDelta)>2*yd then
+                targetX=observed.X+(lateralDelta>0 and 2*yd or -2*yd)
+            end
+            return result(Vector3.new(targetX,position.Y,math.min(goal+yd,targetZ)),"shadow",false,1.5)
+        end
         -- Give the receiver room for the opening .8 seconds. Then walk the
         -- desired trail toward .75 yards by 2.3 seconds. The opening walking
         -- target is two yards shallow, with a one-to-three-yard free band.
@@ -5900,6 +5939,12 @@ function Policy.movement(input,Config,Field,RouteMath)
         end
         local targetZ=position.Z
         if observedDepth<minDepth or observedDepth>maxDepth then targetZ=observed.Z+preferred end
+        -- Once play starts, retain a nearby goal-side position. Do not erase
+        -- the legal opening cushion by walking backward through a stationary
+        -- receiver or a velocity sample that has not arrived yet.
+        if observedDepth>=0 and observedDepth<=3*yd+bias then
+            targetZ=math.max(targetZ,position.Z)
+        end
         local lateralDelta=position.X-observed.X
         local lateral=math.abs(lateralDelta)
         local targetX=position.X
@@ -5922,10 +5967,9 @@ function Policy.movement(input,Config,Field,RouteMath)
         if phase=="Live" and velocity.Z>2 and observedDepth<preferred+.75*yd then
             targetZ=math.max(targetZ,observed.Z+preferred+velocity.Z*.25)
         end
-        -- Once the WR is visibly advancing and we are already level or
-        -- trailing, do not run backward merely to create the opening cushion.
-        -- Walk with that progress; the existing sprint thresholds still apply.
-        if phase=="Live" and velocity.Z>Config.RunSpeed*.5 and observedDepth<=0 then
+        -- Walk with visible forward progress as the receiver reaches the
+        -- nearby cushion; do not wait until they have already run past us.
+        if phase=="Live" and velocity.Z>Config.RunSpeed*.5 and observedDepth<=yd+bias then
             targetZ=math.max(targetZ,position.Z+velocity.Z*.25)
         end
         -- A retreating receiver is leaving the goal. Do not walk farther
@@ -5941,13 +5985,21 @@ function Policy.movement(input,Config,Field,RouteMath)
         local downfieldRecovery=not nearGoal and goal-observed.Z<=12*yd
             and velocity.Z>Config.RunSpeed*.5
             and observedDepth<(input.sprintOn==true and sprintMinDepth or sprintMinDepth-yd)
+        -- A visibly faster deep run can leave walking speed before the old
+        -- six-yard emergency. Forecast only .4 seconds, require real trailing
+        -- separation, and release the burst at two yards instead of body press.
+        local forecastGap=-observedDepth+math.max(0,velocity.Z-Config.RunSpeed)*.4
+        local deepRunRecovery=not nearGoal and finite(input.elapsed) and input.elapsed>=.4
+            and observedDepth < -2*yd
+            and (input.sprintOn==true and velocity.Z>Config.RunSpeed*.5
+                or velocity.Z>Config.RunSpeed+2 and forecastGap>3*yd)
         local retreatingSafe=velocity.Z < -2
         -- Allow a brief trail or a modest lead without restoring fixed spacing.
         -- Use observed positions so projection does not erase that free band.
         -- Walk routine recovery; save sprint for real separation or a goal-line
         -- threat, retaining a lateral buffer instead of copying every cut.
         local needsSprint=phase=="Live" and not retreatingSafe
-            and (urgent or forwardThreat or lateralThreat or downfieldRecovery)
+            and (urgent or forwardThreat or lateralThreat or downfieldRecovery or deepRunRecovery)
         local stamina=finite(input.stamina) and math.max(0,input.stamina) or 0
         local startAt,stopAt=urgent and 75 or 85,urgent and 60 or 70
         local sprint=needsSprint and (input.sprintOn==true and stamina>stopAt
@@ -6009,7 +6061,7 @@ return function(ctx,Policy,services)
     local api={}
     local function log(kind,data)
         if type(append)~="function" then return end
-        data=data or {};data.kind=kind;data.time=world:GetServerTimeNow();data.version="2.46"
+        data=data or {};data.kind=kind;data.time=world:GetServerTimeNow();data.version="2.47"
         pcall(function() append("ciu_fullplay_events.jsonl",http:JSONEncode(data)..string.char(10)) end)
     end
     local function pauseReason(s)
@@ -7218,4 +7270,4 @@ if type(writefile)=="function" then
         end
     end)
 end
-print("Chalk Assist 2.46 loaded. Full Auto preserves defensive stamina and varies legal routes. Idle protection runs automatically. Drag / minimize / Right Shift hide. V assist / B all / F8 unload.")
+print("Chalk Assist 2.47 loaded. Full Auto preserves defensive stamina and varies legal routes. Idle protection runs automatically. Drag / minimize / Right Shift hide. V assist / B all / F8 unload.")

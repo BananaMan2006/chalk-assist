@@ -113,7 +113,7 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
         fields = fields or {}
         if fields.defenderAt==math.huge or fields.defenderAt==-math.huge then fields.defenderAt=nil end
         fields.kind, fields.time = kind, workspace:GetServerTimeNow()
-        fields.version="2.46"
+        fields.version="2.47"
         fields.launchAt=fields.launchAt or throwKey
         table.insert(history, fields)
         if #history > 80 then table.remove(history, 1) end
@@ -1120,6 +1120,6 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
         touchedConnection:Disconnect()
         cancel()
     end
-    log("loaded",{version="2.46",nativeDive=nativeDive~=nil,nativeGrab=nativeGrabTarget~=nil})
+    log("loaded",{version="2.47",nativeDive=nativeDive~=nil,nativeGrab=nativeGrabTarget~=nil})
     return controller
 end

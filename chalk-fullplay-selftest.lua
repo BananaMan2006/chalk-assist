@@ -409,10 +409,10 @@ return function(Policy,create,routeSource,policySource)
                 Vector2.new(edge,f.LOSZ+case.depth*f.YD)},"Floater")
             local p=input({middleStemDeep=true,slowStem=true,slowStemTime=case.cutAt,
                 routePlan=plan,routeWaypoint=2,elapsed=case.cutAt-.001,
-                position=Vector3.new(case.x,4.636868,case.z),stamina=100})
+                position=Vector3.new(case.x,4.636868,case.z),stamina=10})
             local before=Policy.movement(p,Config,f,r)
             assert(before.routeWaypoint==2 and not before.finalSprintCommitted and not before.sprint)
-            p.elapsed=case.cutAt
+            p.elapsed=case.cutAt;p.stamina=100
             local after=Policy.movement(p,Config,f,r)
             assert(after.routeWaypoint==3 and after.finalSprintCommitted and after.sprint)
             assert((after.target.X-p.position.X)*case.side>0 and after.target.Z>p.position.Z,
@@ -439,6 +439,72 @@ return function(Policy,create,routeSource,policySource)
         p.passStarted=false;p.middleStemDeep=false
         local ordinary=assert(move(p));assert(ordinary.routeWaypoint==2 and not ordinary.finalSprintCommitted)
         near(ordinary.target.X,0);near(ordinary.target.Z,63)
+    end)
+    test("recorded9445 delayed stem spends only its current funded early-cut interval",function()
+        local f,r=pressureFixture()
+        local cutAt=3.1918941497802735
+        local plan=r.Plan({Vector2.new(f.MidX,f.LOSZ),Vector2.new(f.MidX,44.37877655029297),
+            Vector2.new(f.MaxX-1,f.LOSZ+25*f.YD)},"Floater")
+        -- Interpolated from navigation9444.743593 and9444.959773, before the
+        -- original cut. The preceding native speed-nine jam lost this ground.
+        local p=input({middleStemDeep=true,slowStem=true,slowStemTime=cutAt,routePlan=plan,
+            routeWaypoint=2,position=Vector3.new(17.457731316476945,4.636868,23.842377447875705),stamina=100})
+        local earliest=plan.Arrival+.12-(p.stamina-10)/Config.SprintDrain
+        assert(cutAt-earliest>.20 and cutAt-earliest<.21)
+        p.elapsed=earliest-.00001
+        assert(not Policy.movement(p,Config,f,r).finalSprintCommitted,"unfunded sprint began before its reserve boundary")
+        p.elapsed=earliest+.00001
+        local d=Policy.movement(p,Config,f,r)
+        assert(d.routeWaypoint==3 and d.finalSprintCommitted and d.sprint)
+        assert(p.stamina-(plan.Arrival-p.elapsed+.12)*Config.SprintDrain>=10,
+            "early cut spent the final reserve or omitted dispatch allowance")
+        p.stamina=99
+        assert(not Policy.movement(p,Config,f,r).finalSprintCommitted,"selection-time stamina replaced current stamina")
+        p.elapsed=plan.Arrival+.12-(p.stamina-10)/Config.SprintDrain+.00001
+        assert(Policy.movement(p,Config,f,r).finalSprintCommitted)
+        p.stamina=90;p.elapsed=cutAt-.00001
+        assert(not Policy.movement(p,Config,f,r).finalSprintCommitted)
+        p.elapsed=cutAt;assert(Policy.movement(p,Config,f,r).finalSprintCommitted,
+            "insufficient optional early budget disabled the ordinary scheduled cut")
+    end)
+    test("early recovery does not alter on-schedule small-lag crossed or ordinary routes",function()
+        local plan=RouteMath.Plan({Vector2.new(0,15),Vector2.new(0,63),Vector2.new(18,105)},"Floater")
+        local p=input({middleStemDeep=true,slowStem=true,slowStemTime=2.4,routePlan=plan,
+            routeWaypoint=2,elapsed=2.2,stamina=100})
+        for _,z in ipairs({59,57,63,65}) do
+            p.position=Vector3.new(0,3,z)
+            local d=move(p);assert(d.routeWaypoint==2 and not d.finalSprintCommitted and not d.sprint,
+                "on-schedule or ordinary startup slack caused an early cut")
+        end
+        p.position=Vector3.new(0,3,40);p.elapsed=2.4-.211
+        assert(not move(p).finalSprintCommitted,"early recovery exceeded the .21-second cap")
+        p.elapsed=2.4-.20;assert(move(p).finalSprintCommitted)
+        p.middleStemDeep=false
+        local ordinary=move(p);assert(ordinary.routeWaypoint==2 and not ordinary.finalSprintCommitted)
+        p.middleStemDeep=true;p.slowStem=false
+        assert(not move(p).finalSprintCommitted)
+    end)
+    test("budgeted early cuts mirror translate and remain latched through flight ownership",function()
+        local f,r=pressureFixture()
+        for _,side in ipairs({-1,1}) do
+            local edge=side<0 and f.MinX+1 or f.MaxX-1
+            local plan=r.Plan({Vector2.new(f.MidX,f.LOSZ),Vector2.new(f.MidX,44.37877655029297),
+                Vector2.new(edge,f.LOSZ+25*f.YD)},"Floater")
+            local p=input({middleStemDeep=true,slowStem=true,slowStemTime=3.1918941497802735,
+                routePlan=plan,routeWaypoint=2,elapsed=plan.Arrival+.12-3.6+.00001,
+                position=Vector3.new(f.MidX+side,4.636868,23.84),stamina=100})
+            local d=Policy.movement(p,Config,f,r)
+            assert(d.finalSprintCommitted and d.sprint and (d.target.X-p.position.X)*side>0)
+            local offset=Vector3.new(-300,0,500);p.offset=offset;p.position=p.position+offset
+            local shifted=Policy.movement(p,Config,f,r)
+            assert(shifted.finalSprintCommitted);near(shifted.target.X,d.target.X+offset.X)
+            near(shifted.target.Z,d.target.Z+offset.Z)
+            p.finalSprintCommitted=true;p.routeWaypoint=2;p.stamina=80
+            assert(Policy.movement(p,Config,f,r).finalSprintCommitted,
+                "already-committed cut was re-evaluated against a falling stamina budget")
+            p.ballActive=true;assert(Policy.movement(p,Config,f,r)==nil)
+            p.ballActive=false;p.passStarted=true;assert(Policy.movement(p,Config,f,r)==nil)
+        end
     end)
     test("final sprint latch survives waypoint refresh and retains the emergency stamina floor",function()
         local plan=RouteMath.Plan({Vector2.new(0,15),Vector2.new(0,63),Vector2.new(18,105)},"Floater")
@@ -805,29 +871,25 @@ return function(Policy,create,routeSource,policySource)
         p.elapsed=nil
         assert(move(p)==nil)
     end)
-    test("DB opens within one to three yards and walks into that band",function()
-        for _,phase in ipairs({"PreSnap","Live"}) do
-            for _,gap in ipairs({-8,-5,-4,-3,-2,-1,0,4,10}) do
-                local p=input({role="DB",phase=phase,position=Vector3.new(0,3,30+gap*Field.YD),
+    test("DB presnap stays one to three yards on the goal side instead of crossing the receiver",function()
+            for _,gap in ipairs({-8,-5,-4,-3,-2,-1,0,1,2,3,4,10}) do
+                local p=input({role="DB",phase="PreSnap",position=Vector3.new(0,3,30+gap*Field.YD),
                     opponentPosition=Vector3.new(0,3,30),opponentVelocity=Vector3.zero,stamina=100})
                 local d=move(p)
                 assert(d and d.kind=="shadow" and not d.sprint)
                 local actual=(d.target.Z-30)/Field.YD
-                assert(actual>=-3 and actual<=-1,"opening coverage left the requested nearby band")
-                near(actual,gap>=-3 and gap<=-1 and gap or -2)
+                assert(actual>=1 and actual<=3,"opening target crossed the receiver or erased legal space")
+                near(actual,gap>=1 and gap<=3 and gap or 2)
                 inBounds(d.target)
             end
-        end
     end)
-    test("DB narrows opening space gradually downfield while learned deep-pass bias remains bounded",function()
-        local lastDepth
+    test("DB presnap respects goal cap while learned deep-pass bias remains bounded",function()
         for _,z in ipairs({60,72,84,90,96,102,110}) do
             local p=input({role="DB",phase="PreSnap",position=Vector3.new(0,3,z+30),
                 opponentPosition=Vector3.new(0,3,z)})
             local d=move(p);local depth=(d.target.Z-z)/Field.YD
-            assert(not d.sprint and depth>=-4 and depth<=.5)
-            if lastDepth then assert(depth>=lastDepth-1e-6,"opening space widened near goal") end
-            lastDepth=depth;inBounds(d.target)
+            assert(not d.sprint and depth>=1 and depth<=3)
+            assert(d.target.Z<=Field.GoalZ+Field.YD);inBounds(d.target)
         end
         local targets={}
         for i,bias in ipairs({0,1.25,2.5,20}) do
@@ -838,7 +900,8 @@ return function(Policy,create,routeSource,policySource)
             p.offset=offset;p.position=p.position+offset;p.opponentPosition=p.opponentPosition+offset
             near(move(p).target.Z,d.target.Z+offset.Z)
         end
-        assert(targets[1]<90 and targets[2]>targets[1] and targets[3]>90)
+        assert(targets[1]>90 and targets[2]>targets[1] and targets[3]>targets[2])
+        near(targets[3],90+4.5*Field.YD)
         near(targets[3],targets[4])
     end)
     test("DB intentional opening gap and ordinary receiver movement do not spend sprint",function()
@@ -855,6 +918,67 @@ return function(Policy,create,routeSource,policySource)
             end
         end
     end)
+    test("recorded DB presnap stall requests free goal-side space and honors shifted LOS",function()
+        local f,r=pressureFixture()
+        local p=input({role="DB",phase="PreSnap",LOS=-19.459,
+            position=Vector3.new(14.592,4.636868,-18.253),
+            opponentPosition=Vector3.new(18.893,4.636868,-20.978),opponentVelocity=Vector3.zero})
+        local d=Policy.movement(p,Config,f,r)
+        assert(d.target.Z>p.position.Z+f.YD and d.target.Z>p.LOS+f.YD,
+            "recorded pinned DB was still sent into WR/LOS")
+        assert(not d.sprint);near(d.target.X,p.position.X)
+        local offset=Vector3.new(100,0,47.3)
+        p.offset=offset;p.position=p.position+offset;p.opponentPosition=p.opponentPosition+offset
+        local shifted=Policy.movement(p,Config,f,r)
+        near(shifted.target.X,d.target.X+offset.X);near(shifted.target.Z,d.target.Z+offset.Z)
+        p.phase="Live";p.position=shifted.target;p.elapsed=0
+        for _,velocity in ipairs({Vector3.zero,Vector3.new(0,0,2)}) do
+            p.opponentVelocity=velocity
+            local live=Policy.movement(p,Config,f,r)
+            assert(live.target.Z>=p.position.Z and not live.sprint,
+                "hike or stale velocity erased the opening cushion")
+        end
+        p.opponentVelocity=nil;p.elapsed=nil
+        assert(Policy.movement(p,Config,f,r).target.Z>=p.position.Z)
+    end)
+    test("DB deep-run forecast starts before recorded late recovery and retains normal reserve",function()
+        local f,r=pressureFixture()
+        local p=input({role="DB",phase="Live",elapsed=.502,LOS=-19.459,
+            position=Vector3.new(22.530,4.636868,-22.277),
+            opponentPosition=Vector3.new(26.383,4.636868,-9.471),
+            opponentVelocity=Vector3.new(0,0,26.995)})
+        for _,case in ipairs({{84,false,false},{85,false,true},{71,true,true},{70,true,false}}) do
+            p.stamina=case[1];p.sprintOn=case[2]
+            assert(Policy.movement(p,Config,f,r).sprint==case[3],"early recovery spent normal reserve")
+        end
+        p.stamina=100;p.sprintOn=false
+        for _,elapsed in ipairs({0,.399}) do
+            p.elapsed=elapsed;assert(not Policy.movement(p,Config,f,r).sprint)
+        end
+        p.elapsed=nil;assert(not Policy.movement(p,Config,f,r).sprint)
+        p.elapsed=.502;p.opponentVelocity=Vector3.new(0,0,20)
+        assert(not Policy.movement(p,Config,f,r).sprint,"ordinary walk became an early sprint")
+        p.opponentVelocity=Vector3.new(0,0,27);p.sprintOn=true
+        p.position=Vector3.new(p.position.X,p.position.Y,p.opponentPosition.Z-2*f.YD)
+        assert(not Policy.movement(p,Config,f,r).sprint,"recovery burst became body press")
+        p.phase="PreSnap";assert(not Policy.movement(p,Config,f,r).sprint)
+    end)
+    test("DB gap forecast hysteresis does not toggle on every small velocity or position sample",function()
+        local p=input({role="DB",phase="Live",elapsed=1,position=Vector3.new(0,3,30-2.5*Field.YD),
+            opponentPosition=Vector3.new(0,3,30),opponentVelocity=Vector3.new(0,0,27)})
+        assert(move(p).sprint)
+        p.sprintOn=true;p.stamina=80
+        for _,speed in ipairs({23,22,21,20}) do
+            p.opponentVelocity=Vector3.new(0,0,speed)
+            assert(move(p).sprint,"small velocity reduction interrupted active recovery")
+        end
+        p.position=Vector3.new(0,3,30-2*Field.YD);assert(not move(p).sprint)
+        p.sprintOn=false;p.opponentVelocity=Vector3.new(0,0,27)
+        for _,gap in ipairs({2,2.01,2.02}) do
+            p.position=Vector3.new(0,3,30-gap*Field.YD)
+            assert(not move(p).sprint,"release edge immediately restarted recovery")
+        end
+    end)
     test("DB advancing receiver does not manufacture more trail from level or shallow position",function()
         for _,gap in ipairs({0,-.25,-1,-2,-4}) do
             for _,speed in ipairs({10.01,20,27}) do
@@ -868,18 +992,20 @@ return function(Policy,create,routeSource,policySource)
             end
         end
     end)
-    test("DB forward-progress guard preserves presnap stationary retreat and ahead boundaries",function()
+    test("DB live opening retains nearby goal-side space until forward movement is visible",function()
         local p=input({role="DB",phase="Live",position=Vector3.new(0,3,30),
             opponentPosition=Vector3.new(0,3,30),elapsed=.2,stamina=100})
         for _,speed in ipairs({-20,0,2,10}) do
             p.opponentVelocity=Vector3.new(0,0,speed)
             local d=move(p)
-            near(d.target.Z,30-2*Field.YD);assert(not d.sprint)
+            near(d.target.Z,30);assert(not d.sprint)
         end
         p.opponentVelocity=Vector3.new(0,0,20);p.phase="PreSnap"
-        near(move(p).target.Z,30-2*Field.YD)
+        near(move(p).target.Z,30+2*Field.YD)
         p.phase="Live";p.position=Vector3.new(0,3,30.01)
-        near(move(p).target.Z,30-2*Field.YD)
+        assert(move(p).target.Z>p.position.Z)
+        p.position=Vector3.new(0,3,30+Field.YD+.01)
+        near(move(p).target.Z,p.position.Z)
         p.position=Vector3.new(0,3,30)
         assert(move(p).target.Z>p.position.Z)
     end)
@@ -1395,7 +1521,7 @@ return function(Policy,create,routeSource,policySource)
             h.snapshot.phase="Live";h.snapshot.snapAt=h.time;h.snapshot.route=nil
             local snap=h.time;h.root.Position=Vector3.new(0,3,15)
             assert(not h:navigate().sprint and not h.api.catchIntent().finalSprint)
-            h.time=snap+2.3;h.root.Position=Vector3.new(0,3,48)
+            h.time=snap+2.18;h.root.Position=Vector3.new(0,3,48)
             assert(not h:navigate().sprint and not h.api.status().finalSprintCommitted)
             h.time=snap+2.4;local d=assert(h:navigate())
             assert(d.sprint and h.api.status().finalSprintCommitted)

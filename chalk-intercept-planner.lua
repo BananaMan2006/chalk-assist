@@ -637,6 +637,10 @@ function Planner.solve(s)
         relaxed,refining=true,true
         if not requireDive then search(true,false) end
         if not best and not requireDive then refine(true,false,false) end
+        -- A normal-age jump-dive can miss only the robustness buffer. Keep
+        -- those action ages in the bounded near-miss retry before considering
+        -- longer descent dives; otherwise a valid narrow witness is omitted.
+        if not best and canDive then refine(false,true,false) end
         if not best and canDive then refine(false,true,true) end
         if best and best.diveAt then best.diveReason="No normal or last-resort upright catch" end
     end

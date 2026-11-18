@@ -146,7 +146,7 @@ local function auditMatch(kind,data)
             end
         end
         appendfile("ciu_match_audit.jsonl",game:GetService("HttpService"):JSONEncode({
-            kind=kind,version="2.46",time=workspace:GetServerTimeNow(),jobId=game.JobId,
+            kind=kind,version="2.47",time=workspace:GetServerTimeNow(),jobId=game.JobId,
             selectedQueue=state and state.selectedMode,phase=phase,role=role,
             fullAuto=fullAutoState,
             fields=fields,rankAttributes=observedRank()})..string.char(10))
@@ -979,7 +979,7 @@ end
 function api.status()
     local ch = characterOf(opponent)
     local holder,isEnemy,holderRole=carrierContext()
-    return {version="2.46", enabled=enabled, role=role or "unknown",rawRole=rawRole or "unknown", phase=phase,
+    return {version="2.47", enabled=enabled, role=role or "unknown",rawRole=rawRole or "unknown", phase=phase,
         ui={visible=windowVisible,minimized=minimized,x=panel.Position.X.Offset,y=panel.Position.Y.Offset},
         matchAlerts={enabled=alertSettings.enabled,saveError=alertSettings.saveError},
         idleGuard=idleGuard and idleGuard.status() or nil,
@@ -1278,4 +1278,4 @@ if type(writefile)=="function" then
         end
     end)
 end
-print("Chalk Assist 2.46 loaded. Full Auto preserves defensive stamina and varies legal routes. Idle protection runs automatically. Drag / minimize / Right Shift hide. V assist / B all / F8 unload.")
+print("Chalk Assist 2.47 loaded. Full Auto preserves defensive stamina and varies legal routes. Idle protection runs automatically. Drag / minimize / Right Shift hide. V assist / B all / F8 unload.")
