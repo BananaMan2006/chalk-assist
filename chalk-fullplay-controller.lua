@@ -46,7 +46,7 @@ return function(ctx,Policy,services)
     local api={}
     local function log(kind,data)
         if type(append)~="function" then return end
-        data=data or {};data.kind=kind;data.time=world:GetServerTimeNow()
+        data=data or {};data.kind=kind;data.time=world:GetServerTimeNow();data.version="2.43"
         pcall(function() append("ciu_fullplay_events.jsonl",http:JSONEncode(data)..string.char(10)) end)
     end
     local function pauseReason(s)
@@ -259,14 +259,29 @@ return function(ctx,Policy,services)
         if not enabled or not defenseContext(s) or not memoryOpponent
             or (s.phase~="Live" and s.phase~="Hike") then return end
         local arc=type(data.Arc)=="table" and data.Arc or s.arc
-        local pass=(data.Pass=="Bullet" or data.Pass=="Floater") and data.Pass or s.passType
+        local pass=(data.Pass=="Bullet" or data.Pass=="Floater") and data.Pass
+            or (s.passType=="Bullet" or s.passType=="Floater") and s.passType or nil
         local launch=finite(data.LaunchAt) and data.LaunchAt or s.launchAt
-        if (pass~="Bullet" and pass~="Floater") or type(arc)~="table"
+        if type(arc)~="table"
             or typeof(arc.P0)~="Vector3" or typeof(arc.P1)~="Vector3"
             or not finite(arc.P0.X) or not finite(arc.P0.Y) or not finite(arc.P0.Z)
             or not finite(arc.P1.X) or not finite(arc.P1.Y) or not finite(arc.P1.Z)
             or not finite(arc.Flight) or arc.Flight<=0
             or not finite(arc.Apex) or arc.Apex<0 or not finite(launch) then return end
+        if not pass then
+            -- Native Throw packets can omit the pass label. Classify only an
+            -- exact, unique match to the visible configured arc; unknown or
+            -- ambiguous arcs must not manufacture defensive learning.
+            for _,name in ipairs({"Bullet","Floater"}) do
+                local definition=type(Config.Pass)=="table" and Config.Pass[name]
+                if type(definition)=="table" and finite(definition.Flight) and finite(definition.Apex)
+                    and arc.Flight==definition.Flight and arc.Apex==definition.Apex then
+                    if pass then return end
+                    pass=name
+                end
+            end
+            if not pass then return end
+        end
         local root,opponent=rootOf(player.Character),rootOf(s.opponent)
         if not root or not opponent or not finite(root.Position.Z) or not finite(opponent.Position.Z) then return end
         local playKey=jobId..":"..tostring(launch)
@@ -497,7 +512,7 @@ return function(ctx,Policy,services)
             lastLoggedWaypoint=choice.routeWaypoint
             local opponent,velocity=input.opponentPosition,input.opponentVelocity
             local localVelocity=root.AssemblyLinearVelocity
-            log("navigate",{action=choice.kind,phase=s.phase,role=s.role,
+            log("navigate",{action=choice.kind,phase=s.phase,role=s.role,elapsed=input.elapsed,
                 x=root.Position.X,z=root.Position.Z,targetX=choice.target.X,targetZ=choice.target.Z,
                 velocityX=localVelocity and localVelocity.X,velocityZ=localVelocity and localVelocity.Z,
                 directionX=direction.X,directionZ=direction.Z,

@@ -822,15 +822,26 @@ function Policy.movement(input,Config,Field,RouteMath)
         local nearGoal=goal-observed.Z<=6*yd
         local profile=type(input.defenseProfile)=="table" and input.defenseProfile or {}
         local bias=clamp(finite(profile.depthBiasYards) and profile.depthBiasYards or 0,0,2.5)*yd
-        -- Give the receiver room initially; gradually narrow that opening
-        -- space downfield instead of sprinting to mirror every early step.
-        local opening=clamp(((goal-observed.Z)/yd-8)/8,0,1)
+        -- Give the receiver room for the opening .8 seconds. Then walk the
+        -- desired trail toward .75 yards by 2.3 seconds, so a late deep throw
+        -- does not inherit the full four-yard opening cushion indefinitely.
+        local geometricOpening=clamp(((goal-observed.Z)/yd-8)/8,0,1)
+        local opening=geometricOpening
+        if phase=="Live" and finite(input.elapsed) then
+            opening=math.min(opening,clamp((2.3-input.elapsed)/1.5,0,1))
+        end
         local preferred=(-.75-3.25*opening)*yd+bias
         local minDepth=preferred-(.75+.25*opening)*yd
         local maxDepth=preferred+(1.25-.25*opening)*yd
+        -- Moving the desired walking target is not a new sprint emergency.
+        -- Keep sprint thresholds on the original geometric spacing, including
+        -- its learned bias and existing near-goal floor.
+        local sprintMinDepth=(-.75-3.25*geometricOpening)*yd+bias
+            -(.75+.25*geometricOpening)*yd
         if nearGoal then
             minDepth=math.max(minDepth,-.5*yd)
             preferred=math.max(preferred,minDepth)
+            sprintMinDepth=math.max(sprintMinDepth,-.5*yd)
         end
         local targetZ=position.Z
         if observedDepth<minDepth or observedDepth>maxDepth then targetZ=observed.Z+preferred end
@@ -862,13 +873,13 @@ function Policy.movement(input,Config,Field,RouteMath)
             targetZ=math.min(targetZ,position.Z)
         end
         local target=Vector3.new(targetX,position.Y,math.min(goal+yd,targetZ))
-        local urgent=velocity.Z>2 and (observedDepth < minDepth-2*yd
-            or nearGoal and observedDepth<minDepth-yd)
-        local forwardThreat=velocity.Z>Config.RunSpeed*.5 and observedDepth < minDepth-yd
+        local urgent=velocity.Z>2 and (observedDepth < sprintMinDepth-2*yd
+            or nearGoal and observedDepth<sprintMinDepth-yd)
+        local forwardThreat=velocity.Z>Config.RunSpeed*.5 and observedDepth < sprintMinDepth-yd
         local lateralThreat=lateral>6*yd and observedDepth<3*yd and velocity.Z>=-2
         local downfieldRecovery=not nearGoal and goal-observed.Z<=12*yd
             and velocity.Z>Config.RunSpeed*.5
-            and observedDepth<(input.sprintOn==true and minDepth or minDepth-yd)
+            and observedDepth<(input.sprintOn==true and sprintMinDepth or sprintMinDepth-yd)
         local retreatingSafe=velocity.Z < -2
         -- Allow a brief trail or a modest lead without restoring fixed spacing.
         -- Use observed positions so projection does not erase that free band.

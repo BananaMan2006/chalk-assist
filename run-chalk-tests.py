@@ -21,7 +21,7 @@ def plain(value, lua_type):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--deps', type=Path, default=Path('/private/tmp/chalk-replay-deps'))
-    parser.add_argument('--suite', action='append', choices=['planner', 'approach', 'mode', 'motion', 'autoplay', 'wr-repeat', 'idle-guard', 'fullplay', 'fullplay-steering', 'carrier-moves', 'pending-sprint', 'match-skip', 'match-skip-identity', 'autoload'], help='Repeat to select suites; default planner + approach.')
+    parser.add_argument('--suite', action='append', choices=['planner', 'approach', 'mode', 'motion', 'autoplay', 'wr-repeat', 'idle-guard', 'fullplay', 'fullplay-steering', 'carrier-moves', 'pending-sprint', 'match-skip', 'match-skip-identity', 'autoload', 'avoidance', 'avoidance-controller'], help='Repeat to select suites; default planner + approach.')
     parser.add_argument('--config', type=Path, help='Locally cached pure Lua module returning native Config.')
     parser.add_argument('--field', type=Path, help='Locally cached pure Lua module returning native Field.')
     parser.add_argument('--route-math', type=Path, help='Saved native RouteMath source for fullplay policy/controller tests.')
@@ -90,6 +90,10 @@ def main(argv=None):
                 result = load(HERE / 'chalk-carrier-moves-selftest.lua')(load(HERE / 'chalk-carrier-moves.lua'))
             elif suite == 'autoplay':
                 result = load(HERE / 'chalk-autoplay-selftest.lua')(load(HERE / 'chalk-autoplay-policy.lua'))
+            elif suite == 'avoidance-controller':
+                result = load(HERE / 'chalk-player-avoidance-controller-selftest.lua')((HERE / 'chalk-intercept-controller.lua').read_text())
+            elif suite == 'avoidance':
+                result = load(HERE / 'chalk-player-avoidance-selftest.lua')(load(HERE / 'chalk-player-avoidance.lua'))
             elif suite == 'autoload':
                 result = load(HERE / 'chalk-autoload-selftest.lua')((HERE / 'chalk-bootstrap.lua').read_text(), (HERE / 'chalk-autoload-controller.lua').read_text(), (HERE / 'chalk-it-up-loader.lua').read_text())
             elif suite == 'match-skip':

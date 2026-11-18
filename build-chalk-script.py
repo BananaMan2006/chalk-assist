@@ -7,6 +7,7 @@ controller = (root / "chalk-intercept-controller.lua").read_text()
 tackle = (root / "chalk-tackle-controller.lua").read_text()
 approach = (root / "chalk-wr-approach.lua").read_text()
 motion = (root / "chalk-character-motion.lua").read_text()
+player_avoidance = (root / "chalk-player-avoidance.lua").read_text()
 carrier_moves = (root / "chalk-carrier-moves.lua").read_text()
 autoplay_policy = (root / "chalk-autoplay-policy.lua").read_text()
 autoplay_controller = (root / "chalk-autoplay-controller.lua").read_text()
@@ -30,6 +31,9 @@ end)()
 local Motion = (function()
 %s
 end)()
+local PlayerAvoidance = (function()
+%s
+end)()
 local createCarrierMoves = (function()
 %s
 end)()
@@ -38,7 +42,7 @@ local createAssist = (function()
 end)()
 assist = createAssist({snapshot=api.context,fullplay=function(s,root,h,now,dt)
     if fullplay then return fullplay.navigate(s,root,h,now,dt) end
-end},Planner,createTackle,WRApproach,Motion,createCarrierMoves)
+end},Planner,createTackle,WRApproach,Motion,createCarrierMoves,PlayerAvoidance)
 if previousState then
     api.setEnabled(previousState.enabled~=false)
     if previousState.auto then assist.setEnabled(previousState.auto.enabled~=false) end
@@ -77,7 +81,7 @@ local createAutoload = (function()
 %s
 end)()
 autoload = createAutoload({bootstrapSource=[====[%s]====]})
-""" % (planner, tackle, approach, motion, carrier_moves, controller, autoplay_policy, autoplay_controller, wr_repeat, idle_guard, fullplay_policy, fullplay_controller, match_skip_controller, autoload_controller, bootstrap)
+""" % (planner, tackle, approach, motion, player_avoidance, carrier_moves, controller, autoplay_policy, autoplay_controller, wr_repeat, idle_guard, fullplay_policy, fullplay_controller, match_skip_controller, autoload_controller, bootstrap)
 assert core.count("-- BUNDLED_INTERCEPT_INIT") == 1
 (root / "chalk-it-up-1v1.lua").write_text(core.replace("-- BUNDLED_INTERCEPT_INIT", bundle))
 print("Built chalk-it-up-1v1.lua")

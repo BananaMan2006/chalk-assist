@@ -146,7 +146,7 @@ local function auditMatch(kind,data)
             end
         end
         appendfile("ciu_match_audit.jsonl",game:GetService("HttpService"):JSONEncode({
-            kind=kind,version="2.42",time=workspace:GetServerTimeNow(),jobId=game.JobId,
+            kind=kind,version="2.43",time=workspace:GetServerTimeNow(),jobId=game.JobId,
             selectedQueue=state and state.selectedMode,phase=phase,role=role,
             fullAuto=fullAutoState,
             fields=fields,rankAttributes=observedRank()})..string.char(10))
@@ -979,7 +979,7 @@ end
 function api.status()
     local ch = characterOf(opponent)
     local holder,isEnemy,holderRole=carrierContext()
-    return {version="2.42", enabled=enabled, role=role or "unknown",rawRole=rawRole or "unknown", phase=phase,
+    return {version="2.43", enabled=enabled, role=role or "unknown",rawRole=rawRole or "unknown", phase=phase,
         ui={visible=windowVisible,minimized=minimized,x=panel.Position.X.Offset,y=panel.Position.Y.Offset},
         matchAlerts={enabled=alertSettings.enabled,saveError=alertSettings.saveError},
         idleGuard=idleGuard and idleGuard.status() or nil,
@@ -2754,6 +2754,239 @@ end
 return Motion
 
 end)()
+local PlayerAvoidance = (function()
+-- Pure, local movement arbitration for physical player collisions only.
+-- No character properties, input bindings, timers, or game services are changed.
+local Avoidance={}
+local FLAT=Vector3.new(1,0,1)
+local ZERO=Vector3.zero
+local function finite(n) return type(n)=="number" and n==n and math.abs(n)<math.huge end
+local function vec(v) return typeof(v)=="Vector3" and finite(v.X) and finite(v.Y) and finite(v.Z) end
+local function clamp(n,a,b) return math.max(a,math.min(b,n)) end
+local function rotate(v,angle)
+    local c,s=math.cos(angle),math.sin(angle)
+    return Vector3.new(v.X*c+v.Z*s,0,v.Z*c-v.X*s)
+end
+local function turn(from,to,limit,side)
+    if not vec(from) or from.Magnitude<.001 then return to end
+    local angle=math.acos(clamp(from:Dot(to),-1,1))
+    if angle<=limit then return to end
+    local cross=from.Z*to.X-from.X*to.Z
+    local sign=math.abs(cross)>.00001 and (cross>0 and 1 or -1) or side or 1
+    return rotate(from,sign*limit)
+end
+local function inside(point,bounds)
+    if bounds==nil then return true end
+    if type(bounds)~="table" or not finite(bounds.minX) or not finite(bounds.maxX)
+        or not finite(bounds.minZ) or not finite(bounds.maxZ)
+        or bounds.minX>=bounds.maxX or bounds.minZ>=bounds.maxZ then return false end
+    return point.X>=bounds.minX and point.X<=bounds.maxX
+        and point.Z>=bounds.minZ and point.Z<=bounds.maxZ
+end
+local function clearance(relative,relativeVelocity,horizon)
+    local speed2=relativeVelocity:Dot(relativeVelocity)
+    local at=speed2>.00001 and clamp(-relative:Dot(relativeVelocity)/speed2,0,horizon) or 0
+    return (relative+relativeVelocity*at).Magnitude,(relative+relativeVelocity*horizon).Magnitude,at
+end
+
+function Avoidance.update(previous,input)
+    input=type(input)=="table" and input or {}
+    local desired=vec(input.desiredDirection) and input.desiredDirection or ZERO
+    local requested=input.requestedSprint==true
+    local function decision(direction,sprint,active,blocked,reason,extra)
+        local result=extra or {}
+        result.direction,result.sprint,result.active,result.blocked,result.reason=direction,sprint,active,blocked,reason
+        result.changed=(direction-desired).Magnitude>.000001 or sprint~=requested
+        return result
+    end
+    if not vec(input.desiredDirection) then
+        return {},decision(ZERO,false,false,false,"invalid movement")
+    end
+    local flat=desired*FLAT
+    if input.canDetour==false or flat.Magnitude<.001 or not vec(input.position) then
+        return {},decision(desired,requested,false,false,
+            input.canDetour==false and "movement owns priority" or "no avoidance needed")
+    end
+    local now=finite(input.now) and input.now or 0
+    local dt=clamp(finite(input.dt) and input.dt or .016,.004,.1)
+    local state={}
+    if type(previous)=="table" and (not finite(previous.now) or now>=previous.now) then
+        for k,v in pairs(previous) do state[k]=v end
+    end
+    state.now=now
+    local position=input.position
+    local heading=flat.Unit
+    local current=vec(input.currentDirection) and input.currentDirection*FLAT or ZERO
+    current=current.Magnitude>.001 and current.Unit or heading
+    local strength=math.min(1,flat.Magnitude)
+    local speed=clamp(finite(input.walkSpeed) and input.walkSpeed or 20,0,60)
+    local run=clamp(finite(input.runSpeed) and input.runSpeed or 20,1,60)
+    local walkSpeed=math.min(speed,run)
+    local radius=clamp(finite(input.clearance) and input.clearance or 3.75,2,6)
+    local horizon=clamp(finite(input.lookahead) and input.lookahead or .25,.1,.3)
+    local height=clamp(finite(input.verticalClearance) and input.verticalClearance or 5,2,8)
+    local turnRate=clamp(finite(input.turnRate) and input.turnRate or 8,2,12)
+
+    -- Position changes are authoritative for progress. Reported velocity can
+    -- remain at 20/27 while another character physically stops our movement.
+    local samples={}
+    for _,sample in ipairs(type(state.samples)=="table" and state.samples or {}) do
+        if type(sample)=="table" and finite(sample.time) and vec(sample.position)
+            and sample.time<=now and now-sample.time<=.24 then
+            samples[#samples+1]={time=sample.time,position=sample.position}
+        end
+    end
+    if #samples==0 or now>samples[#samples].time then samples[#samples+1]={time=now,position=position} end
+    while #samples>32 do table.remove(samples,1) end
+    state.samples=samples
+    local first=samples[1]
+    local measured=first and now-first.time>=.15
+        and ((position-first.position)*FLAT).Magnitude/(now-first.time) or nil
+
+    local obstacles={}
+    local nearest=math.huge
+    for _,other in ipairs(type(input.opponents)=="table" and input.opponents or {}) do
+        if type(other)=="table" and vec(other.position) and math.abs(other.position.Y-position.Y)<=height then
+            local relative=(other.position-position)*FLAT
+            local velocity=vec(other.velocity) and other.velocity*FLAT or ZERO
+            if velocity.Magnitude>40 then velocity=velocity.Unit*40 end
+            if relative.Magnitude<=radius+(speed+velocity.Magnitude)*horizon+3 then
+                obstacles[#obstacles+1]={relative=relative,velocity=velocity}
+                nearest=math.min(nearest,relative.Magnitude)
+            end
+        end
+    end
+    local touching=nearest<=radius+.5
+    if not touching then state.contactSince=nil
+    elseif not finite(state.contactSince) then state.contactSince=now end
+    local blocked=touching and measured~=nil and measured<math.max(1,speed*strength*.2)
+        and now-state.contactSince>=.12
+    state.blocked=blocked
+    state.progressSpeed=measured
+
+    local threat=false
+    local closestThreat,closestDistance
+    for _,other in ipairs(obstacles) do
+        local rv=other.velocity-heading*(speed*strength)
+        local gap=clearance(other.relative,rv,horizon)
+        local approaching=other.relative:Dot(rv)<-.001
+        local approachHeading=heading
+        if current:Dot(heading)<.98 then
+            local currentVelocity=other.velocity-current*(speed*strength)
+            local currentGap=clearance(other.relative,currentVelocity,horizon)
+            if currentGap<gap and other.relative:Dot(currentVelocity)<-.001 then
+                gap,approaching,approachHeading=currentGap,true,current
+            end
+        end
+        if gap<radius and approaching and other.relative:Dot(approachHeading)>=-radius*.4 then
+            threat=true
+            if not closestDistance or gap<closestDistance then closestThreat,closestDistance=other,gap end
+        end
+    end
+
+    local function evaluate(direction,moveSpeed)
+        local endpoint=position+direction*math.max(radius,moveSpeed*horizon)
+        if not inside(endpoint,input.bounds) then return false,-math.huge,false end
+        local minimum=math.huge
+        local escaping=true
+        for _,other in ipairs(obstacles) do
+            local initial=other.relative.Magnitude
+            local gap,ending=clearance(other.relative,other.velocity-direction*moveSpeed,horizon)
+            minimum=math.min(minimum,gap)
+            if initial<radius then
+                if gap<initial-.15 or ending<initial+.25 then escaping=false end
+            elseif gap<radius then escaping=false end
+        end
+        return escaping,minimum,true
+    end
+
+    if not threat and not blocked then
+        local old=state.active and state.heading or nil
+        if vec(old) and old.Magnitude>.001 and old:Dot(heading)<.9999 then
+            local returning=turn(old.Unit,heading,turnRate*dt,state.side)
+            state.heading,state.active=returning,true
+            state.clearSince=state.clearSince or now
+            local amount=speed>0 and strength*walkSpeed/speed or strength
+            local safeAmount=0
+            for _,fraction in ipairs({1,.75,.5,.25,.125}) do
+                local safe=evaluate(returning,speed*amount*fraction)
+                if safe then safeAmount=amount*fraction;break end
+            end
+            return state,decision(returning*safeAmount,false,true,false,"returning to path",
+                {side=state.side,progressSpeed=measured})
+        end
+        state.active,state.heading=false,current
+        state.clearSince=state.clearSince or now
+        if now-state.clearSince>=.35 then state.side=nil end
+        return state,decision(desired,requested,false,false,"clear",{progressSpeed=measured})
+    end
+    state.clearSince=nil
+
+    local preferred=state.side
+    if preferred~=1 and preferred~=-1 then
+        local lateral=closestThreat and (heading.Z*closestThreat.relative.X-heading.X*closestThreat.relative.Z) or 0
+        preferred=lateral>.05 and -1 or 1
+    end
+    local function candidate(side)
+        local best
+        for _,degrees in ipairs({35,55,75,90}) do
+            local direction=rotate(heading,side*math.rad(degrees))
+            local safe,gap,bounded=evaluate(direction,walkSpeed*strength)
+            if safe then
+                local score=direction:Dot(heading)+math.min(gap,radius+3)*.015
+                if not best or score>best.score then best={direction=direction,score=score,side=side} end
+            elseif bounded and nearest<radius then
+                -- Once overlapping, a sideways exit may initially touch the
+                -- same capsule. Prefer increasing final separation to pushing.
+                local improves=true
+                for _,other in ipairs(obstacles) do
+                    if other.relative.Magnitude<radius+.5 then
+                        local ending=(other.relative+(other.velocity-direction*walkSpeed*strength)*horizon).Magnitude
+                        if ending<other.relative.Magnitude+.4 then improves=false end
+                    end
+                end
+                if improves then
+                    local score=-10+gap*.1+direction:Dot(heading)*.05
+                    if not best or score>best.score then best={direction=direction,score=score,side=side} end
+                end
+            end
+        end
+        return best
+    end
+    local chosen=candidate(preferred)
+    -- Retain the selected passing side while it remains usable; small opponent
+    -- movements or roster order changes must not flip the character repeatedly.
+    if not chosen then chosen=candidate(-preferred) end
+    if not chosen then
+        state.active=true
+        state.heading=vec(state.heading) and state.heading or heading
+        return state,decision(ZERO,false,true,blocked,"no room to pass",
+            {side=state.side,progressSpeed=measured})
+    end
+    state.side=chosen.side
+    local from=state.active and vec(state.heading) and state.heading.Magnitude>.001 and state.heading.Unit or current
+    local steered=turn(from,chosen.direction,turnRate*dt,state.side)
+    local amount=speed>0 and strength*walkSpeed/speed or strength
+    local safeAmount
+    for _,fraction in ipairs({1,.75,.5,.25,.125}) do
+        local safe=evaluate(steered,speed*amount*fraction)
+        if safe then safeAmount=amount*fraction;break end
+    end
+    if not safeAmount then
+        -- Release sprint immediately during a contact escape. When still
+        -- outside the capsule, wait for the smooth turn to open a safe path.
+        safeAmount=nearest<radius and amount or 0
+    end
+    if not inside(position+steered*math.max(radius,speed*safeAmount*horizon),input.bounds) then safeAmount=0 end
+    state.heading,state.active=steered,true
+    return state,decision(steered*safeAmount,false,true,blocked,
+        blocked and "walking out of contact" or "passing player",
+        {side=state.side,progressSpeed=measured})
+end
+
+return Avoidance
+
+end)()
 local createCarrierMoves = (function()
 -- Native WR juke requests after confirmed possession. Geometry is an estimate;
 -- only the game decides whether a move is accepted and avoids a tackle.
@@ -2957,7 +3190,7 @@ end
 end)()
 local createAssist = (function()
 -- Factory bundled into chalk-it-up-1v1.lua. Uses normal character controls.
-return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMoves)
+return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMoves, PlayerAvoidance)
     local Players = game:GetService("Players")
     local RunService = game:GetService("RunService")
     local UIS = game:GetService("UserInputService")
@@ -2991,6 +3224,9 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
     local nativeTackle,nativeDive,nativeGrabTarget,controls,inputOwned
     local tackleAssist,catching,navigation=false,false,false
     local carrierAssist
+    local avoidanceState,avoidanceRoot,avoidancePhase,lastAvoidanceReason
+    local avoidanceStatus={active=false,blocked=false}
+    local lastAvoidanceLog=0
     pcall(function() controls=require(me.PlayerScripts:WaitForChild("PlayerModule",3)):GetControls() end)
     local ups = (debug and debug.getupvalues) or getupvalues
     local function namedUpvalue(f, name)
@@ -3068,7 +3304,7 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
         fields = fields or {}
         if fields.defenderAt==math.huge or fields.defenderAt==-math.huge then fields.defenderAt=nil end
         fields.kind, fields.time = kind, workspace:GetServerTimeNow()
-        fields.version="2.42"
+        fields.version="2.43"
         fields.launchAt=fields.launchAt or throwKey
         table.insert(history, fields)
         if #history > 80 then table.remove(history, 1) end
@@ -3098,6 +3334,8 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
     end
     local function release()
         navigation=false
+        avoidanceState,avoidanceRoot,avoidancePhase,lastAvoidanceReason=nil,nil,nil,nil
+        avoidanceStatus={active=false,blocked=false}
         if carrierAssist then carrierAssist.cancel() end
         if controlledHumanoid and controlledHumanoid.Parent then
             controlledHumanoid:Move(Vector3.zero, false)
@@ -3107,8 +3345,14 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
         releaseSprint()
         releaseInput()
     end
-    local function cancel()
-        release()
+    local function cancel(preserveMovement)
+        if preserveMovement then
+            -- A running Full Auto route hands its existing native sprint to
+            -- ball pursuit. Do not send a false/true sprint pair at the throw.
+            navigation=false
+            if carrierAssist then carrierAssist.cancel() end
+            atTarget,parkedPosition=false,nil
+        else release() end
         plan, lastSnapshot = nil, nil
         jumped, dived = false, false
         jumpRequest=nil
@@ -3292,6 +3536,57 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
         steering=Vector3.new(math.sin(a+turn),0,math.cos(a+turn))
         return steering
     end
+    local function avoidPlayers(s,root,h,now,dt,direction,requestedSprint,canDetour)
+        if not PlayerAvoidance or not s.playBudget then
+            avoidanceState,avoidanceRoot,avoidancePhase,lastAvoidanceReason=nil,nil,nil,nil
+            avoidanceStatus={active=false,blocked=false}
+            return {direction=direction,sprint=requestedSprint,active=false,blocked=false}
+        end
+        if avoidanceRoot~=root or avoidancePhase~=s.phase then
+            avoidanceState=nil;avoidanceRoot=root;avoidancePhase=s.phase
+        end
+        local opponents,seen={},{}
+        local function inspect(character)
+            if not character or seen[character] then return end
+            seen[character]=true
+            local other=character:FindFirstChild("HumanoidRootPart")
+            local otherH=character:FindFirstChildOfClass("Humanoid")
+            if other and otherH and otherH.Health>0 then
+                opponents[#opponents+1]={position=other.Position,velocity=other.AssemblyLinearVelocity}
+            end
+        end
+        inspect(s.opponent)
+        for _,character in ipairs(s.opponents or {}) do inspect(character) end
+        local offset=s.offset or Vector3.zero
+        local geo=s.geo
+        local bounds=geo and {minX=geo.MinX+.5,maxX=geo.MaxX-.5,minZ=geo.BackZ+.5,maxZ=geo.EndZ-.5}
+            or {minX=Field.MinX+offset.X+.5,maxX=Field.MaxX+offset.X-.5,
+                minZ=Field.BackZ+offset.Z+.5,maxZ=Field.EndZ+offset.Z-.5}
+        local decision
+        avoidanceState,decision=PlayerAvoidance.update(avoidanceState,{now=now,dt=dt,
+            position=root.Position,velocity=root.AssemblyLinearVelocity,desiredDirection=direction,
+            opponents=opponents,bounds=bounds,requestedSprint=requestedSprint,walkSpeed=h.WalkSpeed,
+            runSpeed=Config.RunSpeed,currentDirection=steering,
+            canDetour=canDetour and h.FloorMaterial~=Enum.Material.Air and not h.PlatformStand})
+        -- The avoidance helper already limits its turns and checks that path.
+        -- A second smoother could turn back inside the checked clearance.
+        if decision.active then
+            local heading=avoidanceState and avoidanceState.heading
+            if typeof(heading)=="Vector3" and heading.Magnitude>.001 then steering=heading.Unit
+            elseif decision.direction.Magnitude>.001 then steering=decision.direction.Unit end
+        end
+        avoidanceStatus={active=decision.active,blocked=decision.blocked,reason=decision.reason}
+        if decision.active and (decision.reason~=lastAvoidanceReason or now-lastAvoidanceLog>.3)
+            or not decision.active and lastAvoidanceReason then
+            log("playerAvoidance",{active=decision.active,blocked=decision.blocked,reason=decision.reason,
+                role=s.role,phase=s.phase,position=xyz(root.Position),velocity=xyz(root.AssemblyLinearVelocity),
+                requestedDirection=xyz(direction),direction=xyz(decision.direction),
+                requestedSprint=requestedSprint,sprint=decision.sprint,stamina=me:GetAttribute("Stamina")})
+            lastAvoidanceLog=now
+        end
+        lastAvoidanceReason=decision.active and decision.reason or nil
+        return decision
+    end
     local function moveWRApproach(root,h,direction,dt)
         ownInput();controlledHumanoid=h
         if (tonumber(me:GetAttribute("Stamina")) or 0)>2 and me:GetAttribute("SprintOn")~=true then
@@ -3320,7 +3615,10 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
             end
         end
         local budget=sprintBudget(s)
-        if strength>0.001 and directive.sprint==true and budget.canSprint then
+        local avoid=avoidPlayers(s,root,h,now,dt,flat,strength>0.001 and directive.sprint==true and budget.canSprint,true)
+        flat=avoid.direction*Vector3.new(1,0,1)
+        strength=math.min(flat.Magnitude,1)
+        if strength>0.001 and avoid.sprint==true then
             ownsSprint=true
             if me:GetAttribute("SprintOn")~=true then Moves.HoldSprint(true) end
         else
@@ -3328,9 +3626,10 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
             if ownsSprint or me:GetAttribute("SprintOn")==true then Moves.HoldSprint(false) end
             ownsSprint=false
         end
-        h:Move(strength>0.001 and smoothDirection(flat,root,h,dt,directive.preserveDepth==true)*strength
-            or Vector3.zero,false)
-        return true,directive.message or "Automatic play"
+        h:Move(strength>0.001 and (avoid.active and flat
+            or smoothDirection(flat,root,h,dt,directive.preserveDepth==true)*strength) or Vector3.zero,false)
+        return true,avoid.active and (avoid.blocked and "Blocked · saving sprint and moving clear"
+            or "Moving around opponent") or directive.message or "Automatic play"
     end
     local function updateWRReturn(s,root,h,now,dt)
         if not wrReturn then return false end
@@ -3426,7 +3725,9 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
         if tackleAssist then tackleAssist.cancel(true) end
         catching=true
         if throwKey~=s.launchAt then
-            cancel()
+            local preserveMovement=s.playBudget and ownsSprint and me:GetAttribute("SprintOn")==true
+                and controlledHumanoid and controlledHumanoid.Parent and not controlledHumanoid.PlatformStand
+            cancel(preserveMovement)
             wrDefenderDeadline=nil
             trackedMotionRoot,trackedAirborne=nil,false
             throwKey, nextSolve = s.launchAt, 0
@@ -3710,16 +4011,22 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
                 atTarget,parkedPosition=true,root.Position
             elseif delta.Magnitude>2.5 then atTarget,parkedPosition=false,nil end
             local moving=not atTarget and (plan.kind=="pursue" or plan.diveAt~=nil or now<plan.stopAt)
-            if moving and sprintBudget(s).canSprint
-                and me:GetAttribute("SprintOn")~=true then
-                ownsSprint=true
-                Moves.HoldSprint(true)
-                log("sprint",{position=xyz(root.Position),stamina=me:GetAttribute("Stamina")})
-            end
             if moving then
                 local desired=(plan.diveAt or plan.timedArrival) and delta:Dot(plan.direction)<=0 and plan.direction
                     or (delta.Magnitude>0.1 and delta.Unit or plan.direction)
-                h:Move(smoothDirection(desired,root,h,dt)*(plan.movementScale or 1),false)
+                local actionAt=math.min(plan.jumpAt or math.huge,plan.diveAt or math.huge,plan.contactAt or math.huge)
+                local avoid=avoidPlayers(s,root,h,now,dt,desired*(plan.movementScale or 1),sprintBudget(s).canSprint,
+                    not jumped and not jumpRequest and not dived and actionAt-now>.35)
+                if avoid.sprint and me:GetAttribute("SprintOn")~=true then
+                    ownsSprint=true;Moves.HoldSprint(true)
+                    log("sprint",{position=xyz(root.Position),stamina=me:GetAttribute("Stamina")})
+                elseif not avoid.sprint and s.playBudget and me:GetAttribute("SprintOn")==true then
+                    Moves.HoldSprint(false);ownsSprint=false
+                    trackedSprintRoot,sprintTracking=nil,nil
+                end
+                h:Move(avoid.active and avoid.direction
+                    or smoothDirection(avoid.direction,root,h,dt)*math.min(1,avoid.direction.Magnitude),false)
+                if avoid.active then nextReplan=math.min(nextReplan,now+.1) end
             else
                 h:Move(Vector3.zero,false)
                 releaseSprint()
@@ -3905,6 +4212,7 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
     function controller.status()
         return {enabled=auto,nativeDive=nativeTackle~=nil,message=message,error=lastError,
             navigation=navigation,
+            playerAvoidance=avoidanceStatus,
             carrierMoves=carrierAssist and carrierAssist.status() or nil,
             plan=plan and plan.kind or nil,contactAt=plan and plan.contactAt or nil,
             risk=plan and plan.risk or nil,
@@ -4000,14 +4308,14 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
         touchedConnection:Disconnect()
         cancel()
     end
-    log("loaded",{version="2.42",nativeDive=nativeDive~=nil,nativeGrab=nativeGrabTarget~=nil})
+    log("loaded",{version="2.43",nativeDive=nativeDive~=nil,nativeGrab=nativeGrabTarget~=nil})
     return controller
 end
 
 end)()
 assist = createAssist({snapshot=api.context,fullplay=function(s,root,h,now,dt)
     if fullplay then return fullplay.navigate(s,root,h,now,dt) end
-end},Planner,createTackle,WRApproach,Motion,createCarrierMoves)
+end},Planner,createTackle,WRApproach,Motion,createCarrierMoves,PlayerAvoidance)
 if previousState then
     api.setEnabled(previousState.enabled~=false)
     if previousState.auto then assist.setEnabled(previousState.auto.enabled~=false) end
@@ -5515,15 +5823,26 @@ function Policy.movement(input,Config,Field,RouteMath)
         local nearGoal=goal-observed.Z<=6*yd
         local profile=type(input.defenseProfile)=="table" and input.defenseProfile or {}
         local bias=clamp(finite(profile.depthBiasYards) and profile.depthBiasYards or 0,0,2.5)*yd
-        -- Give the receiver room initially; gradually narrow that opening
-        -- space downfield instead of sprinting to mirror every early step.
-        local opening=clamp(((goal-observed.Z)/yd-8)/8,0,1)
+        -- Give the receiver room for the opening .8 seconds. Then walk the
+        -- desired trail toward .75 yards by 2.3 seconds, so a late deep throw
+        -- does not inherit the full four-yard opening cushion indefinitely.
+        local geometricOpening=clamp(((goal-observed.Z)/yd-8)/8,0,1)
+        local opening=geometricOpening
+        if phase=="Live" and finite(input.elapsed) then
+            opening=math.min(opening,clamp((2.3-input.elapsed)/1.5,0,1))
+        end
         local preferred=(-.75-3.25*opening)*yd+bias
         local minDepth=preferred-(.75+.25*opening)*yd
         local maxDepth=preferred+(1.25-.25*opening)*yd
+        -- Moving the desired walking target is not a new sprint emergency.
+        -- Keep sprint thresholds on the original geometric spacing, including
+        -- its learned bias and existing near-goal floor.
+        local sprintMinDepth=(-.75-3.25*geometricOpening)*yd+bias
+            -(.75+.25*geometricOpening)*yd
         if nearGoal then
             minDepth=math.max(minDepth,-.5*yd)
             preferred=math.max(preferred,minDepth)
+            sprintMinDepth=math.max(sprintMinDepth,-.5*yd)
         end
         local targetZ=position.Z
         if observedDepth<minDepth or observedDepth>maxDepth then targetZ=observed.Z+preferred end
@@ -5555,13 +5874,13 @@ function Policy.movement(input,Config,Field,RouteMath)
             targetZ=math.min(targetZ,position.Z)
         end
         local target=Vector3.new(targetX,position.Y,math.min(goal+yd,targetZ))
-        local urgent=velocity.Z>2 and (observedDepth < minDepth-2*yd
-            or nearGoal and observedDepth<minDepth-yd)
-        local forwardThreat=velocity.Z>Config.RunSpeed*.5 and observedDepth < minDepth-yd
+        local urgent=velocity.Z>2 and (observedDepth < sprintMinDepth-2*yd
+            or nearGoal and observedDepth<sprintMinDepth-yd)
+        local forwardThreat=velocity.Z>Config.RunSpeed*.5 and observedDepth < sprintMinDepth-yd
         local lateralThreat=lateral>6*yd and observedDepth<3*yd and velocity.Z>=-2
         local downfieldRecovery=not nearGoal and goal-observed.Z<=12*yd
             and velocity.Z>Config.RunSpeed*.5
-            and observedDepth<(input.sprintOn==true and minDepth or minDepth-yd)
+            and observedDepth<(input.sprintOn==true and sprintMinDepth or sprintMinDepth-yd)
         local retreatingSafe=velocity.Z < -2
         -- Allow a brief trail or a modest lead without restoring fixed spacing.
         -- Use observed positions so projection does not erase that free band.
@@ -5630,7 +5949,7 @@ return function(ctx,Policy,services)
     local api={}
     local function log(kind,data)
         if type(append)~="function" then return end
-        data=data or {};data.kind=kind;data.time=world:GetServerTimeNow()
+        data=data or {};data.kind=kind;data.time=world:GetServerTimeNow();data.version="2.43"
         pcall(function() append("ciu_fullplay_events.jsonl",http:JSONEncode(data)..string.char(10)) end)
     end
     local function pauseReason(s)
@@ -5843,14 +6162,29 @@ return function(ctx,Policy,services)
         if not enabled or not defenseContext(s) or not memoryOpponent
             or (s.phase~="Live" and s.phase~="Hike") then return end
         local arc=type(data.Arc)=="table" and data.Arc or s.arc
-        local pass=(data.Pass=="Bullet" or data.Pass=="Floater") and data.Pass or s.passType
+        local pass=(data.Pass=="Bullet" or data.Pass=="Floater") and data.Pass
+            or (s.passType=="Bullet" or s.passType=="Floater") and s.passType or nil
         local launch=finite(data.LaunchAt) and data.LaunchAt or s.launchAt
-        if (pass~="Bullet" and pass~="Floater") or type(arc)~="table"
+        if type(arc)~="table"
             or typeof(arc.P0)~="Vector3" or typeof(arc.P1)~="Vector3"
             or not finite(arc.P0.X) or not finite(arc.P0.Y) or not finite(arc.P0.Z)
             or not finite(arc.P1.X) or not finite(arc.P1.Y) or not finite(arc.P1.Z)
             or not finite(arc.Flight) or arc.Flight<=0
             or not finite(arc.Apex) or arc.Apex<0 or not finite(launch) then return end
+        if not pass then
+            -- Native Throw packets can omit the pass label. Classify only an
+            -- exact, unique match to the visible configured arc; unknown or
+            -- ambiguous arcs must not manufacture defensive learning.
+            for _,name in ipairs({"Bullet","Floater"}) do
+                local definition=type(Config.Pass)=="table" and Config.Pass[name]
+                if type(definition)=="table" and finite(definition.Flight) and finite(definition.Apex)
+                    and arc.Flight==definition.Flight and arc.Apex==definition.Apex then
+                    if pass then return end
+                    pass=name
+                end
+            end
+            if not pass then return end
+        end
         local root,opponent=rootOf(player.Character),rootOf(s.opponent)
         if not root or not opponent or not finite(root.Position.Z) or not finite(opponent.Position.Z) then return end
         local playKey=jobId..":"..tostring(launch)
@@ -6081,7 +6415,7 @@ return function(ctx,Policy,services)
             lastLoggedWaypoint=choice.routeWaypoint
             local opponent,velocity=input.opponentPosition,input.opponentVelocity
             local localVelocity=root.AssemblyLinearVelocity
-            log("navigate",{action=choice.kind,phase=s.phase,role=s.role,
+            log("navigate",{action=choice.kind,phase=s.phase,role=s.role,elapsed=input.elapsed,
                 x=root.Position.X,z=root.Position.Z,targetX=choice.target.X,targetZ=choice.target.Z,
                 velocityX=localVelocity and localVelocity.X,velocityZ=localVelocity and localVelocity.Z,
                 directionX=direction.X,directionZ=direction.Z,
@@ -6824,4 +7158,4 @@ if type(writefile)=="function" then
         end
     end)
 end
-print("Chalk Assist 2.42 loaded. Full Auto preserves defensive stamina and varies legal routes. Idle protection runs automatically. Drag / minimize / Right Shift hide. V assist / B all / F8 unload.")
+print("Chalk Assist 2.43 loaded. Full Auto preserves defensive stamina and varies legal routes. Idle protection runs automatically. Drag / minimize / Right Shift hide. V assist / B all / F8 unload.")

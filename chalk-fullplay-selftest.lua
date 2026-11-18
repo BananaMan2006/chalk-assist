@@ -814,6 +814,46 @@ return function(Policy,create,routeSource,policySource)
             end
         end
     end)
+    test("DB time taper preserves opening space then walks closer without inventing sprint urgency",function()
+        local p=input({role="DB",phase="Live",position=Vector3.new(0,3,18),
+            opponentPosition=Vector3.new(0,3,30),opponentVelocity=Vector3.new(0,0,20),
+            stamina=100,elapsed=0})
+        local early=move(p)
+        for _,elapsed in ipairs({.4,.8}) do
+            p.elapsed=elapsed;local d=move(p)
+            near(d.target.Z,early.target.Z);assert(not d.sprint)
+        end
+        p.elapsed=1.55;local middle=move(p)
+        p.elapsed=2.3;local late=move(p)
+        assert(middle.target.Z>early.target.Z and late.target.Z>middle.target.Z)
+        assert(not middle.sprint and not late.sprint,"target taper spent the final-play reserve")
+        near(late.target.Z,30-.75*Field.YD+20*.25)
+        p.elapsed=20;near(move(p).target.Z,late.target.Z)
+        p.phase="PreSnap";local presnap=move(p);p.elapsed=0
+        near(move(p).target.Z,presnap.target.Z)
+    end)
+    test("DB unknown snap timing leaves geometric spacing unchanged",function()
+        local p=input({role="DB",phase="Live",position=Vector3.new(0,3,18),
+            opponentPosition=Vector3.new(0,3,30),opponentVelocity=Vector3.new(0,0,20)})
+        local before=move(p)
+        p.elapsed=nil;near(move(p).target.Z,before.target.Z)
+        p.elapsed=0/0;near(move(p).target.Z,before.target.Z)
+        p.elapsed=math.huge;near(move(p).target.Z,before.target.Z)
+    end)
+    test("DB taper retains original urgent lateral and near-goal sprint thresholds",function()
+        for _,case in ipairs({
+            {position=Vector3.new(0,3,5),opponentPosition=Vector3.new(0,3,30),
+                opponentVelocity=Vector3.new(0,0,20),stamina=75},
+            {position=Vector3.new(0,3,18),opponentPosition=Vector3.new(25,3,30),
+                opponentVelocity=Vector3.new(0,0,0),stamina=85},
+            {position=Vector3.new(0,3,98),opponentPosition=Vector3.new(0,3,110),
+                opponentVelocity=Vector3.new(0,0,20),stamina=75}}) do
+            case.role="DB";case.phase="Live";case.elapsed=0
+            local p=input(case);local early=move(p);assert(early.sprint)
+            p.elapsed=3;assert(move(p).sprint==early.sprint)
+            p.stamina=59;p.sprintOn=true;assert(not move(p).sprint)
+        end
+    end)
     test("DB follows equal-speed movement while retaining opening room",function()
         local p=input({role="DB",phase="Live",position=Vector3.new(0,3,18),
             opponentPosition=Vector3.new(0,3,30),opponentVelocity=Vector3.new(0,0,20),stamina=100})
@@ -1051,10 +1091,57 @@ return function(Policy,create,routeSource,policySource)
         local data={Type="Throw",Pass=s.passType,LaunchAt=h.time,
             Arc={P0=Vector3.new(0,6,Field.LOSZ-7*Field.YD)+offset,
                 P1=Vector3.new(0,3.5,options.targetZ or Field.GoalZ)+offset,Flight=3.1,Apex=42}}
+        if options.arcPass then
+            data.Arc.Flight=Config.Pass[options.arcPass].Flight
+            data.Arc.Apex=Config.Pass[options.arcPass].Apex
+        end
+        if options.arc then data.Arc=options.arc end
+        if options.noPass then data.Pass=nil;s.passType=nil end
+        if options.noPayloadPass then data.Pass=nil end
+        if options.contextPass then s.passType=options.contextPass end
         if options.noArc then data.Arc=nil end
         h.api.onFx(data)
         return data
     end
+    test("unlabelled native arcs populate defensive learning using unique configured flight and apex",function()
+        for _,pass in ipairs({"Bullet","Floater"}) do
+            local h=harness();h.api.setEnabled(true)
+            observedDefenseThrow(h,{noPass=true,nativeMode=true,arcPass=pass})
+            assert(h.api.status().activeDefense.pass==pass)
+            h.api.onMatch({Phase="Result",Result="Touchdown",Point="Opp"})
+            local state=h.api.status()
+            assert(state.defenseProfile.samples==1,"native unlabelled throw was not learned")
+            near(state.defenseProfile.depthBiasYards,pass=="Floater" and 1.25 or 0)
+        end
+    end)
+    test("unknown ambiguous and malformed unlabelled arcs do not create defensive evidence",function()
+        local function rejected(arc)
+            local h=harness();h.api.setEnabled(true)
+            observedDefenseThrow(h,{noPass=true,arc=arc})
+            assert(h.api.status().activeDefense==nil)
+            h.api.onMatch({Phase="Result",Result="Touchdown",Point="Opp"})
+            assert(h.api.status().defenseProfile.samples==0)
+        end
+        local valid={P0=Vector3.new(0,6,-6),P1=Vector3.new(0,3.5,120),Flight=3.1,Apex=42}
+        for _,bad in ipairs({{Flight=3.100001},{Apex=42.001},{Flight=0},{Flight=0/0},
+            {Apex=math.huge},{P0=Vector3.new(0/0,6,0)},{P1="missing"}}) do
+            local arc=table.clone(valid);for key,value in pairs(bad) do arc[key]=value end
+            rejected(arc)
+        end
+        local previous=Config.Pass.Bullet
+        Config.Pass.Bullet={Flight=3.1,Apex=42}
+        local ok,reason=pcall(rejected,valid)
+        Config.Pass.Bullet=previous
+        assert(ok,reason)
+    end)
+    test("known packet pass takes precedence and known context pass survives an omitted label",function()
+        local explicit=harness();explicit.api.setEnabled(true)
+        observedDefenseThrow(explicit,{pass="Bullet",contextPass="Floater"})
+        assert(explicit.api.status().activeDefense.pass=="Bullet")
+        local context=harness();context.api.setEnabled(true)
+        observedDefenseThrow(context,{pass="Bullet",noPayloadPass=true})
+        assert(context.api.status().activeDefense.pass=="Bullet")
+    end)
     test("DB profile learns only confirmed shallow deep-Floater losses and deduplicates terminal evidence",function()
         local h=harness({accountId=123});h.api.setEnabled(true)
         local thrown=observedDefenseThrow(h,{nativeMode=true,offset=Vector3.new(100,0,-40)})

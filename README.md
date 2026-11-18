@@ -1,4 +1,4 @@
-# Chalk Assist 2.42
+# Chalk Assist 2.43
 
 Chalk Assist is available in the public [BananaMan2006/chalk-assist repository](https://github.com/BananaMan2006/chalk-assist). The ready-to-run file is `chalk-it-up-1v1.lua`. This repository contains the assist's own source and tests; it does not include copied Roblox game scripts, account settings, recordings, or credentials.
 
@@ -49,20 +49,24 @@ Full Auto WR now walks the middle stem to preserve stamina, then commits to a co
 
 DB starts with a loose 3–5 yard cushion, tracks small changes less aggressively, and uses short sprint bursts. Prethrow defense usually keeps at least 70 stamina, or 60 when recovery is urgent. Ball pursuit keeps a 40-point reserve; WR final pursuit keeps 10, with a small input-delay allowance. Coverage tightens near the goal and still adjusts deeper against opponents who repeatedly win with deep floaters. All movement uses native game speed. These are local movement and reach estimates, not guaranteed catches or wins.
 
+Full Auto also checks short-range player collisions. It measures actual position changes, keeps a stable side while moving around a blocker, and releases sprint while the path is blocked. The checked detour controls its own smooth turn and stays inside the field. Catch movement keeps priority during the final action window; tackle and carrier moves keep their existing priority. The throw handoff preserves an already-owned sprint instead of briefly toggling it off and on.
+
+Opening DB spacing narrows gradually after the first part of the route, using walking targets without lowering the existing sprint thresholds. Defensive learning can identify an unlabeled throw only when its flight time and arc height uniquely match the game’s configured Bullet or Floater values.
+
 The **Auto-leave usernames (separate with commas)** field accepts multiple exact Roblox account usernames, for example `@stupieddaniel, @AnotherPlayer, @ThirdPlayer`. Commas, semicolons, spaces, and pasted line breaks work as separators; `@` is optional and duplicates are removed without regard to capitalization. Press Enter or click outside the field to save the whole list. Invalid entries leave the last valid list unchanged. Clear the field to stop matching anyone. The initial list is `@stupieddaniel` when no saved setting exists; upgrading preserves your previous single username and ON/OFF setting. **AUTO LEAVE ON/OFF** controls this setting independently. Detection uses a verified current opponent, not someone merely present in the lobby, and ignores display-name matches. If any verified opponent matches a name in the list, the script requests a leave and rejoin of the public lobby. The server decides whether that departure counts as a forfeit or awards the other account a win; the script cannot guarantee the result. The toggle and full username list persist across joins on that laptop.
 
-The 2.42 update adds offline checks for real diving contact, reserve enforcement, portable startup, and route/movement timing. The portable loader passes **33/33** lifecycle tests; planner, motion, approach, steering, and sprint checks pass **113/113**; fullplay passes **107/107**, for **253/253** offline checks. You can run the self-contained checks with Lupa installed into a temporary dependency folder:
+The 2.43 changes pass **166/166** affected offline checks: 20 collision-path tests, 15 controller integration tests, 18 steering/sprint checks, and 113 fullplay checks. Four recorded defensive situations were also replayed with the new positioning. These are local checks, not guaranteed live catches. You can run the self-contained collision and movement checks with Lupa installed into a temporary dependency folder:
 
 ```sh
 python3 -m pip install --target /tmp/chalk-test-deps lupa
-python3 run-chalk-tests.py --deps /tmp/chalk-test-deps --suite autoload --suite planner --suite motion --suite approach --suite fullplay-steering --suite pending-sprint
+python3 run-chalk-tests.py --deps /tmp/chalk-test-deps --suite avoidance --suite avoidance-controller --suite fullplay-steering --suite pending-sprint
 ```
 
 Windows PowerShell:
 
 ```powershell
 py -3 -m pip install --target "$env:TEMP\chalk-test-deps" lupa
-py -3 run-chalk-tests.py --deps "$env:TEMP\chalk-test-deps" --suite autoload --suite planner --suite motion --suite approach --suite fullplay-steering --suite pending-sprint
+py -3 run-chalk-tests.py --deps "$env:TEMP\chalk-test-deps" --suite avoidance --suite avoidance-controller --suite fullplay-steering --suite pending-sprint
 ```
 
 These tests check local logic, not live Roblox physics, server decisions, successful interceptions, or awarded wins. The optional fullplay suite requires a separately available native RouteMath fixture; that game source is not shipped in this repository. For troubleshooting, inspect the script window's message, the executor console, or `ciu_autoload_status.txt` in the workspace when using autoexec.

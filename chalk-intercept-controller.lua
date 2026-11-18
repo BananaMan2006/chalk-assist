@@ -1,5 +1,5 @@
 -- Factory bundled into chalk-it-up-1v1.lua. Uses normal character controls.
-return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMoves)
+return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMoves, PlayerAvoidance)
     local Players = game:GetService("Players")
     local RunService = game:GetService("RunService")
     local UIS = game:GetService("UserInputService")
@@ -33,6 +33,9 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
     local nativeTackle,nativeDive,nativeGrabTarget,controls,inputOwned
     local tackleAssist,catching,navigation=false,false,false
     local carrierAssist
+    local avoidanceState,avoidanceRoot,avoidancePhase,lastAvoidanceReason
+    local avoidanceStatus={active=false,blocked=false}
+    local lastAvoidanceLog=0
     pcall(function() controls=require(me.PlayerScripts:WaitForChild("PlayerModule",3)):GetControls() end)
     local ups = (debug and debug.getupvalues) or getupvalues
     local function namedUpvalue(f, name)
@@ -110,7 +113,7 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
         fields = fields or {}
         if fields.defenderAt==math.huge or fields.defenderAt==-math.huge then fields.defenderAt=nil end
         fields.kind, fields.time = kind, workspace:GetServerTimeNow()
-        fields.version="2.42"
+        fields.version="2.43"
         fields.launchAt=fields.launchAt or throwKey
         table.insert(history, fields)
         if #history > 80 then table.remove(history, 1) end
@@ -140,6 +143,8 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
     end
     local function release()
         navigation=false
+        avoidanceState,avoidanceRoot,avoidancePhase,lastAvoidanceReason=nil,nil,nil,nil
+        avoidanceStatus={active=false,blocked=false}
         if carrierAssist then carrierAssist.cancel() end
         if controlledHumanoid and controlledHumanoid.Parent then
             controlledHumanoid:Move(Vector3.zero, false)
@@ -149,8 +154,14 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
         releaseSprint()
         releaseInput()
     end
-    local function cancel()
-        release()
+    local function cancel(preserveMovement)
+        if preserveMovement then
+            -- A running Full Auto route hands its existing native sprint to
+            -- ball pursuit. Do not send a false/true sprint pair at the throw.
+            navigation=false
+            if carrierAssist then carrierAssist.cancel() end
+            atTarget,parkedPosition=false,nil
+        else release() end
         plan, lastSnapshot = nil, nil
         jumped, dived = false, false
         jumpRequest=nil
@@ -334,6 +345,57 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
         steering=Vector3.new(math.sin(a+turn),0,math.cos(a+turn))
         return steering
     end
+    local function avoidPlayers(s,root,h,now,dt,direction,requestedSprint,canDetour)
+        if not PlayerAvoidance or not s.playBudget then
+            avoidanceState,avoidanceRoot,avoidancePhase,lastAvoidanceReason=nil,nil,nil,nil
+            avoidanceStatus={active=false,blocked=false}
+            return {direction=direction,sprint=requestedSprint,active=false,blocked=false}
+        end
+        if avoidanceRoot~=root or avoidancePhase~=s.phase then
+            avoidanceState=nil;avoidanceRoot=root;avoidancePhase=s.phase
+        end
+        local opponents,seen={},{}
+        local function inspect(character)
+            if not character or seen[character] then return end
+            seen[character]=true
+            local other=character:FindFirstChild("HumanoidRootPart")
+            local otherH=character:FindFirstChildOfClass("Humanoid")
+            if other and otherH and otherH.Health>0 then
+                opponents[#opponents+1]={position=other.Position,velocity=other.AssemblyLinearVelocity}
+            end
+        end
+        inspect(s.opponent)
+        for _,character in ipairs(s.opponents or {}) do inspect(character) end
+        local offset=s.offset or Vector3.zero
+        local geo=s.geo
+        local bounds=geo and {minX=geo.MinX+.5,maxX=geo.MaxX-.5,minZ=geo.BackZ+.5,maxZ=geo.EndZ-.5}
+            or {minX=Field.MinX+offset.X+.5,maxX=Field.MaxX+offset.X-.5,
+                minZ=Field.BackZ+offset.Z+.5,maxZ=Field.EndZ+offset.Z-.5}
+        local decision
+        avoidanceState,decision=PlayerAvoidance.update(avoidanceState,{now=now,dt=dt,
+            position=root.Position,velocity=root.AssemblyLinearVelocity,desiredDirection=direction,
+            opponents=opponents,bounds=bounds,requestedSprint=requestedSprint,walkSpeed=h.WalkSpeed,
+            runSpeed=Config.RunSpeed,currentDirection=steering,
+            canDetour=canDetour and h.FloorMaterial~=Enum.Material.Air and not h.PlatformStand})
+        -- The avoidance helper already limits its turns and checks that path.
+        -- A second smoother could turn back inside the checked clearance.
+        if decision.active then
+            local heading=avoidanceState and avoidanceState.heading
+            if typeof(heading)=="Vector3" and heading.Magnitude>.001 then steering=heading.Unit
+            elseif decision.direction.Magnitude>.001 then steering=decision.direction.Unit end
+        end
+        avoidanceStatus={active=decision.active,blocked=decision.blocked,reason=decision.reason}
+        if decision.active and (decision.reason~=lastAvoidanceReason or now-lastAvoidanceLog>.3)
+            or not decision.active and lastAvoidanceReason then
+            log("playerAvoidance",{active=decision.active,blocked=decision.blocked,reason=decision.reason,
+                role=s.role,phase=s.phase,position=xyz(root.Position),velocity=xyz(root.AssemblyLinearVelocity),
+                requestedDirection=xyz(direction),direction=xyz(decision.direction),
+                requestedSprint=requestedSprint,sprint=decision.sprint,stamina=me:GetAttribute("Stamina")})
+            lastAvoidanceLog=now
+        end
+        lastAvoidanceReason=decision.active and decision.reason or nil
+        return decision
+    end
     local function moveWRApproach(root,h,direction,dt)
         ownInput();controlledHumanoid=h
         if (tonumber(me:GetAttribute("Stamina")) or 0)>2 and me:GetAttribute("SprintOn")~=true then
@@ -362,7 +424,10 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
             end
         end
         local budget=sprintBudget(s)
-        if strength>0.001 and directive.sprint==true and budget.canSprint then
+        local avoid=avoidPlayers(s,root,h,now,dt,flat,strength>0.001 and directive.sprint==true and budget.canSprint,true)
+        flat=avoid.direction*Vector3.new(1,0,1)
+        strength=math.min(flat.Magnitude,1)
+        if strength>0.001 and avoid.sprint==true then
             ownsSprint=true
             if me:GetAttribute("SprintOn")~=true then Moves.HoldSprint(true) end
         else
@@ -370,9 +435,10 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
             if ownsSprint or me:GetAttribute("SprintOn")==true then Moves.HoldSprint(false) end
             ownsSprint=false
         end
-        h:Move(strength>0.001 and smoothDirection(flat,root,h,dt,directive.preserveDepth==true)*strength
-            or Vector3.zero,false)
-        return true,directive.message or "Automatic play"
+        h:Move(strength>0.001 and (avoid.active and flat
+            or smoothDirection(flat,root,h,dt,directive.preserveDepth==true)*strength) or Vector3.zero,false)
+        return true,avoid.active and (avoid.blocked and "Blocked · saving sprint and moving clear"
+            or "Moving around opponent") or directive.message or "Automatic play"
     end
     local function updateWRReturn(s,root,h,now,dt)
         if not wrReturn then return false end
@@ -468,7 +534,9 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
         if tackleAssist then tackleAssist.cancel(true) end
         catching=true
         if throwKey~=s.launchAt then
-            cancel()
+            local preserveMovement=s.playBudget and ownsSprint and me:GetAttribute("SprintOn")==true
+                and controlledHumanoid and controlledHumanoid.Parent and not controlledHumanoid.PlatformStand
+            cancel(preserveMovement)
             wrDefenderDeadline=nil
             trackedMotionRoot,trackedAirborne=nil,false
             throwKey, nextSolve = s.launchAt, 0
@@ -752,16 +820,22 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
                 atTarget,parkedPosition=true,root.Position
             elseif delta.Magnitude>2.5 then atTarget,parkedPosition=false,nil end
             local moving=not atTarget and (plan.kind=="pursue" or plan.diveAt~=nil or now<plan.stopAt)
-            if moving and sprintBudget(s).canSprint
-                and me:GetAttribute("SprintOn")~=true then
-                ownsSprint=true
-                Moves.HoldSprint(true)
-                log("sprint",{position=xyz(root.Position),stamina=me:GetAttribute("Stamina")})
-            end
             if moving then
                 local desired=(plan.diveAt or plan.timedArrival) and delta:Dot(plan.direction)<=0 and plan.direction
                     or (delta.Magnitude>0.1 and delta.Unit or plan.direction)
-                h:Move(smoothDirection(desired,root,h,dt)*(plan.movementScale or 1),false)
+                local actionAt=math.min(plan.jumpAt or math.huge,plan.diveAt or math.huge,plan.contactAt or math.huge)
+                local avoid=avoidPlayers(s,root,h,now,dt,desired*(plan.movementScale or 1),sprintBudget(s).canSprint,
+                    not jumped and not jumpRequest and not dived and actionAt-now>.35)
+                if avoid.sprint and me:GetAttribute("SprintOn")~=true then
+                    ownsSprint=true;Moves.HoldSprint(true)
+                    log("sprint",{position=xyz(root.Position),stamina=me:GetAttribute("Stamina")})
+                elseif not avoid.sprint and s.playBudget and me:GetAttribute("SprintOn")==true then
+                    Moves.HoldSprint(false);ownsSprint=false
+                    trackedSprintRoot,sprintTracking=nil,nil
+                end
+                h:Move(avoid.active and avoid.direction
+                    or smoothDirection(avoid.direction,root,h,dt)*math.min(1,avoid.direction.Magnitude),false)
+                if avoid.active then nextReplan=math.min(nextReplan,now+.1) end
             else
                 h:Move(Vector3.zero,false)
                 releaseSprint()
@@ -947,6 +1021,7 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
     function controller.status()
         return {enabled=auto,nativeDive=nativeTackle~=nil,message=message,error=lastError,
             navigation=navigation,
+            playerAvoidance=avoidanceStatus,
             carrierMoves=carrierAssist and carrierAssist.status() or nil,
             plan=plan and plan.kind or nil,contactAt=plan and plan.contactAt or nil,
             risk=plan and plan.risk or nil,
@@ -1042,6 +1117,6 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
         touchedConnection:Disconnect()
         cancel()
     end
-    log("loaded",{version="2.42",nativeDive=nativeDive~=nil,nativeGrab=nativeGrabTarget~=nil})
+    log("loaded",{version="2.43",nativeDive=nativeDive~=nil,nativeGrab=nativeGrabTarget~=nil})
     return controller
 end
