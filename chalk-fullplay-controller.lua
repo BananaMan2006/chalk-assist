@@ -46,7 +46,7 @@ return function(ctx,Policy,services)
     local api={}
     local function log(kind,data)
         if type(append)~="function" then return end
-        data=data or {};data.kind=kind;data.time=world:GetServerTimeNow();data.version="2.47"
+        data=data or {};data.kind=kind;data.time=world:GetServerTimeNow();data.version="2.48"
         pcall(function() append("ciu_fullplay_events.jsonl",http:JSONEncode(data)..string.char(10)) end)
     end
     local function pauseReason(s)
@@ -76,7 +76,9 @@ return function(ctx,Policy,services)
             "slowStemTime","slowStemSpeed","slowStemStartupSlack","cutAt","startSprintAt","forceDiveFinish",
             "requireDive","finalSprint","finalSprintDuration","finalSprintReserve","finalSprintStamina",
             "sidelineInset","sidelineFallback","sidelineFallbackReason","diveWitnessElapsed",
-            "diveWitnessX","diveWitnessZ","diveWitnessMargin"}) do
+            "diveWitnessX","diveWitnessZ","diveWitnessMargin","adaptiveUnderneath",
+            "observedDefenderDepthYards","underneathDepthLimit","carryReserve","carryMoveReady","estimatedCatchStamina",
+            "pacedSlant","slantWalkUntil","slantSprintDuration"}) do
             local v=value[key]
             if type(v)=="boolean" or type(v)=="string" and #v<=512
                 or type(v)=="number" and v==v and math.abs(v)<math.huge then out[key]=v end
@@ -220,7 +222,8 @@ return function(ctx,Policy,services)
                 if pending and s.role=="WR" and s.phase~="Lobby" and s.phase~="Result"
                     and pending.roundKey==tostring(s.preSnapEnds or "current") then
                     activeRoute=pending;submitted=true;roundKey=pending.roundKey
-                    finalSprintCommitted=old.finalSprintCommitted==true and pending.slowStem==true
+                    finalSprintCommitted=old.finalSprintCommitted==true
+                        and (pending.slowStem==true or pending.pacedSlant==true)
                 end
                 if old.routeRoundKey==tostring(s.preSnapEnds or "current")
                     and type(old.routeWaypoint)=="number" and old.routeWaypoint==old.routeWaypoint
@@ -339,6 +342,7 @@ return function(ctx,Policy,services)
             lastLateBendTrialTrigger=lastLateBendTrialTrigger,defenseProfile=defenseProfile(),
             middleStemDeep=choice and choice.middleStemDeep==true,
             slowStem=choice and choice.slowStem==true,slowStemTime=choice and choice.slowStemTime,
+            pacedSlant=choice and choice.pacedSlant==true,slantWalkUntil=choice and choice.slantWalkUntil,
             finalSprintCommitted=finalSprintCommitted}
     end
     local function resetRound(key)
@@ -371,13 +375,26 @@ return function(ctx,Policy,services)
         if s.phase~="PreSnap" or s.role~="WR" then return end
         local key=tostring(s.preSnapEnds or "current")
         if key~=roundKey then resetRound(key) end
-        if submitted then message="Full auto · route submitted";return end
+        if submitted then
+            local choice=selected or activeRoute
+            message=choice and choice.adaptiveUnderneath and "Full auto · Underneath: defender deep"
+                or "Full auto · route submitted"
+            return
+        end
         local now=world:GetServerTimeNow()
         if submitTries>=3 or now<nextSubmit then return end
         -- Do not submit over an already closed/manual-submitted board.
         if not board.IsOpen() then message="Full auto · waiting for route board";return end
         local remaining=type(s.preSnapEnds)=="number" and s.preSnapEnds-now or math.huge
-        if now-(observationStarted or now)<1 and remaining>.5 then
+        local observation=1
+        local defender=rootOf(s.opponent)
+        if defender then
+            local velocity=defender.AssemblyLinearVelocity
+            local depth=defender.Position.Z-(s.offset and s.offset.Z or 0)-(s.LOS or Field.LOSZ)
+            if velocity and velocity.Z>math.max(2,(Config.PreSnapDBSpeed or 12)*.5)
+                and depth>=0 and depth<14*Field.YD then observation=3 end
+        end
+        if now-(observationStarted or now)<observation and remaining>.5 then
             message="Full auto · reading defender position";return
         end
         local root=rootOf(player.Character)
@@ -408,6 +425,10 @@ return function(ctx,Policy,services)
             requireDive=chosen.requireDive,finalSprint=chosen.finalSprint,slowStemSpeed=chosen.slowStemSpeed,
             finalSprintDuration=chosen.finalSprintDuration,finalSprintReserve=chosen.finalSprintReserve,
             finalSprintStamina=chosen.finalSprintStamina,sidelineInset=chosen.sidelineInset,
+            adaptiveUnderneath=chosen.adaptiveUnderneath,observedDefenderDepthYards=chosen.observedDefenderDepthYards,
+            underneathDepthLimit=chosen.underneathDepthLimit,carryReserve=chosen.carryReserve,carryMoveReady=chosen.carryMoveReady,
+            estimatedCatchStamina=chosen.estimatedCatchStamina,
+            pacedSlant=chosen.pacedSlant,slantWalkUntil=chosen.slantWalkUntil,slantSprintDuration=chosen.slantSprintDuration,
             sidelineFallback=chosen.sidelineFallback,sidelineFallbackReason=chosen.sidelineFallbackReason,
             diveWitnessElapsed=chosen.diveWitnessElapsed,diveWitnessX=chosen.diveWitnessX,
             diveWitnessZ=chosen.diveWitnessZ,diveWitnessMargin=chosen.diveWitnessMargin})
@@ -421,7 +442,8 @@ return function(ctx,Policy,services)
         -- Same close operation used when the normal route menu finishes.
         local closed,closeError=pcall(board.Close)
         errorMessage=not closed and tostring(closeError) or nil
-        message="Full auto · "..chosen.payload.Pass.." route submitted"
+        message=chosen.adaptiveUnderneath and "Full auto · Underneath: defender deep"
+            or "Full auto · "..chosen.payload.Pass.." route submitted"
         log("routeRequested",{pass=chosen.payload.Pass,startX=chosen.payload.StartX,
             points=#chosen.payload.Points,arrival=chosen.plan.Arrival,launch=chosen.plan.Launch,
             estimatedSeparation=chosen.estimatedSeparation,estimateOnly=true,
@@ -442,6 +464,8 @@ return function(ctx,Policy,services)
             startSprintAt=chosen.startSprintAt,requireDive=chosen.requireDive,
             slowStemSpeed=chosen.slowStemSpeed,finalSprintDuration=chosen.finalSprintDuration,
             finalSprintReserve=chosen.finalSprintReserve,finalSprintStamina=chosen.finalSprintStamina,
+            adaptiveUnderneath=chosen.adaptiveUnderneath,observedDefenderDepthYards=chosen.observedDefenderDepthYards,
+            underneathDepthLimit=chosen.underneathDepthLimit,carryReserve=chosen.carryReserve,carryMoveReady=chosen.carryMoveReady,
             sidelineInset=chosen.sidelineInset,sidelineFallback=chosen.sidelineFallback,
             sidelineFallbackReason=chosen.sidelineFallbackReason,
             diveWitnessElapsed=chosen.diveWitnessElapsed,diveWitnessX=chosen.diveWitnessX,
@@ -449,6 +473,7 @@ return function(ctx,Policy,services)
             hikeTime=chosen.hikeTime,setupDefenderReach=chosen.setupDefenderReach,
             estimatedCatchZ=chosen.estimatedCatchZ,estimatedCatchAt=chosen.estimatedCatchAt,
             estimatedRACDistance=chosen.estimatedRACDistance,estimatedCatchStamina=chosen.estimatedCatchStamina,
+            pacedSlant=chosen.pacedSlant,slantWalkUntil=chosen.slantWalkUntil,slantSprintDuration=chosen.slantSprintDuration,
             uprightCatchReachable=chosen.uprightCatchReachable,
             nearGoalFloaterAvailable=chosen.nearGoalFloaterAvailable,
             insideGoalFloaterAvailable=chosen.insideGoalFloaterAvailable,
@@ -505,7 +530,9 @@ return function(ctx,Policy,services)
                 direction=direction*math.max(0,math.min(1,choice.moveScale))
             end
         end
-        message="Full auto · "..choice.kind
+        local routeChoice=selected or activeRoute
+        message=choice.kind=="route" and routeChoice and routeChoice.adaptiveUnderneath
+            and "Full auto · Underneath: defender deep" or "Full auto · "..choice.kind
         local sampleInterval=.2
         if lastKind~=choice.kind or choice.routeWaypoint~=lastLoggedWaypoint or now-lastSample>=sampleInterval then
             lastKind,lastSample=choice.kind,now
@@ -644,7 +671,7 @@ return function(ctx,Policy,services)
         local point=routePlan and type(routePlan.Points)=="table" and routePlan.Points[routeWaypoint]
         if typeof(point)~="Vector2" or not finite(point.X) or not finite(point.Y) then point=nil end
         return {deepFinish=choice.middleStemDeep==true,side=choice.side,waypoint=point,goalZ=Field.GoalZ,endZ=Field.EndZ,
-            requireDive=true,
+            requireDive=choice.requireDive~=false,
             continuousSprint=finalSprintCommitted,finalSprint=finalSprintCommitted}
     end
     function api.movementBudget()

@@ -24,7 +24,7 @@ return function(Policy,create,routeSource,policySource)
         CornerMinAngle=45,CornerMaxAngle=135,CornerMaxPenalty=.25,
         FillSpeed=24,MinLaunch=.4,ReleaseHeight=6,CatchHeight=3.5,QBBackYards=7,
         HandUpOffset=3.5,JumpHeight=6,CatchRadius=3.75,
-        Moves={Dive={Yards=3,Time=.35}},
+        Moves={Dive={Yards=3,Time=.35},Juke={Cost=20}},
         Pass={Bullet={Flight=1.05,Apex=6},Floater={Flight=3.1,Apex=42,Lead=4}},
         ReleaseDefs={LegalRelease={}}}
     local Field={MinX=-30,MaxX=30,MidX=0,BackZ=0,LOSZ=15,GoalZ=120,EndZ=150,YD=3,TurfY=0}
@@ -145,9 +145,9 @@ return function(Policy,create,routeSource,policySource)
         assert(count(depths)>1,"twelve selections changed only side/shape, never depth")
         assert(count(families)>1,"mirroring was the only offensive variation")
     end)
-    test("offensive variety preserves native route legality and stamina reachability",function()
+    test("ordinary offensive variety preserves native route legality and stamina reachability",function()
         for _,stamina in ipairs({0,15,50,100}) do
-            local p=input({stamina=stamina,opponentPosition=Vector3.new(-10,3,40)})
+            local p=input({stamina=stamina,opponentPosition=Vector3.new(-10,3,40),adaptiveRoutes=false})
             local baseline=choose(p);local history={}
             for i=1,8 do
                 p.recentSelections=history;p.selectionIndex=i-1
@@ -191,7 +191,11 @@ return function(Policy,create,routeSource,policySource)
         return f,r,p
     end
     local function assertLongPass(c,f,los)
-        if c.payload.Pass=="Bullet" then
+        if c.adaptiveUnderneath then
+            assert(c.payload.Pass=="Bullet" and c.depth>=8-1e-5 and c.depth<=16+1e-5)
+            assert(c.observedDefenderDepthYards>=14 and c.depth<=c.underneathDepthLimit+1e-5)
+            assert(c.requireDive==false and c.estimatedCatchStamina>=10+.12*Config.SprintDrain)
+        elseif c.payload.Pass=="Bullet" then
             assert(c.depth>=16-1e-5 and c.depth<=22+1e-5,"short/overlong Bullet selected")
             assert(math.abs(c.payload.Points[#c.payload.Points].X-c.payload.StartX)>=3*f.YD-1e-5,
                 "Bullet route is not genuinely slanted")
@@ -205,6 +209,131 @@ return function(Policy,create,routeSource,policySource)
         local f,r,p=pressureFixture();p.middleStemDeep=nil
         return f,r,p
     end
+    test("observed deep defender selects a reachable underneath catch with carry stamina",function()
+        local f,r,p=defaultMiddleFixture()
+        p.opponentPosition=Vector3.new(f.MidX,4.636868,p.LOS+18*f.YD)
+        local c=assert(Policy.chooseRoute(p,Config,f,r))
+        assert(c.adaptiveUnderneath and c.routeStrategy=="underneath" and c.payload.Pass=="Bullet")
+        assert(c.depth>=8 and c.depth<=14+1e-5 and c.requireDive==false and not c.middleStemDeep)
+        assert(c.plan.Target.Y<=p.opponentPosition.Z-4*f.YD+1e-5)
+        assert(c.reachable and c.uprightCatchReachable and c.runTime+.12<=c.plan.Arrival)
+        near(c.estimatedCatchStamina,p.stamina-c.plan.Arrival*Config.SprintDrain)
+        assert(c.carryMoveReady and c.estimatedCatchStamina>=Config.Moves.Juke.Cost+10+.12*Config.SprintDrain)
+        near(c.carryReserve,Config.Moves.Juke.Cost+10)
+        local native=r.Plan(c.payload.Points,c.payload.Pass)
+        near(native.Launch,c.plan.Launch);near(native.Arrival,c.plan.Arrival)
+        assert(r.Length(c.payload.Points)<=Config.MaxInkYards*f.YD)
+    end)
+    test("underneath strategy requires observed depth and does not carry over to a shallow defender",function()
+        local f,r,p=defaultMiddleFixture()
+        p.opponentPosition=Vector3.new(f.MidX,4.636868,p.LOS+14*f.YD)
+        local deep=assert(Policy.chooseRoute(p,Config,f,r));assert(deep.adaptiveUnderneath)
+        p.recentRoutes={{pass=deep.payload.Pass,shape=deep.shape,depth=deep.depth,side=deep.side,
+            signature=deep.signature,success=true,adaptiveUnderneath=true}}
+        p.opponentPosition=Vector3.new(f.MidX,4.636868,p.LOS+13.99*f.YD)
+        local shallow=assert(Policy.chooseRoute(p,Config,f,r));assert(not shallow.adaptiveUnderneath)
+        p.opponentPosition=nil;p.opponentVelocity=nil
+        assert(not assert(Policy.chooseRoute(p,Config,f,r)).adaptiveUnderneath,
+            "missing defender observation reused a previous deep-camp assumption")
+        p.mode="Team";assert(Policy.chooseRoute(p,Config,f,r)==nil)
+    end)
+    test("underneath routes vary legal families and sides without using the deep end-zone strategy",function()
+        local f,r,p=defaultMiddleFixture();p.opponentPosition=Vector3.new(f.MidX,4.636868,f.GoalZ)
+        local history,families,sides={},{},{}
+        for i=1,12 do
+            p.recentSelections=history;p.selectionIndex=i-1
+            local c=assert(Policy.chooseRoute(p,Config,f,r));assert(c.adaptiveUnderneath and c.reachable)
+            families[c.family]=true;sides[c.side]=true
+            history[#history+1]={pass=c.payload.Pass,shape=c.shape,depth=c.depth,side=c.side,
+                signature=c.signature,family=c.family,cutCount=c.cutCount,roundKey=tostring(i)}
+            while #history>6 do table.remove(history,1) end
+        end
+        local count=0;for _ in pairs(families) do count=count+1 end
+        assert(count>1 and sides[-1] and sides[1],"deep-defender offense repeated the same family or side")
+    end)
+    test("underneath selection respects current LOS field translation and available stamina",function()
+        local f,r,p=defaultMiddleFixture()
+        for _,los in ipairs({f.LOSZ,10,30}) do
+            p.LOS=los;p.position=Vector3.new(f.MidX,4.636868,los)
+            p.opponentPosition=Vector3.new(f.MidX,4.636868,los+18*f.YD)
+            for _,stamina in ipairs({0,30,50,75,100}) do
+                p.stamina=stamina
+                local c=assert(Policy.chooseRoute(p,Config,f,r))
+                if c.adaptiveUnderneath then
+                    assert(c.reachable and c.estimatedCatchStamina>=10+.12*Config.SprintDrain)
+                    assert(c.plan.Target.Y<=p.opponentPosition.Z-4*f.YD+1e-5)
+                    for _,point in ipairs(c.payload.Points) do
+                        assert(point.X>=f.MinX+1 and point.X<=f.MaxX-1
+                            and point.Y>=math.max(f.BackZ+1,los-3*f.YD) and point.Y<=f.EndZ-1)
+                    end
+                    local offset=Vector3.new(300,0,-250)
+                    p.offset=offset;p.position=p.position+offset;p.opponentPosition=p.opponentPosition+offset
+                    local shifted=assert(Policy.chooseRoute(p,Config,f,r))
+                    assert(shifted.signature==c.signature and shifted.adaptiveUnderneath)
+                    near(shifted.plan.Target.X,c.plan.Target.X);near(shifted.plan.Target.Y,c.plan.Target.Y)
+                    p.position=p.position-offset;p.opponentPosition=p.opponentPosition-offset;p.offset=Vector3.zero
+                end
+            end
+        end
+    end)
+    test("shallow coverage mixes a paced long slant after a deep Floater while retaining native carry reserve",function()
+        local f,r,p=defaultMiddleFixture()
+        local first=assert(Policy.chooseRoute(p,Config,f,r));assert(first.payload.Pass=="Floater")
+        p.recentSelections={{pass=first.payload.Pass,shape=first.shape,depth=first.depth,
+            side=first.side,family=first.family,signature=first.signature}}
+        local c=assert(Policy.chooseRoute(p,Config,f,r))
+        assert(c.pacedSlant and c.payload.Pass=="Bullet" and c.routeStrategy=="long-slant-mix")
+        assert(c.experimentalAttempt=="bounded-pass-mix" and c.pressureMode=="contested")
+        assert(c.depth>=16 and c.depth<=18 and c.shape=="slant" and #c.plan.Points==2)
+        assert(c.requireDive==false and c.carryMoveReady and c.estimatedCatchStamina>=33)
+        assert(math.abs(c.plan.Target.X-c.payload.StartX)>=3*f.YD)
+        local length=r.Length(c.payload.Points)
+        near(c.slantWalkUntil*Config.RunSpeed+(c.plan.Arrival-.12-c.slantWalkUntil)*Config.SprintSpeed,length)
+        near(c.estimatedCatchStamina,p.stamina-(c.plan.Arrival-c.slantWalkUntil)*Config.SprintDrain)
+        assert(c.slantWalkUntil>=.15 and c.slantWalkUntil<c.plan.Launch-.12)
+        local native=r.Plan(c.payload.Points,c.payload.Pass)
+        near(native.Arrival,c.plan.Arrival);near(native.Launch,c.plan.Launch)
+        p.recentSelections[#p.recentSelections+1]={pass=c.payload.Pass,shape=c.shape,depth=c.depth,
+            side=c.side,family=c.family,signature=c.signature}
+        assert(not assert(Policy.chooseRoute(p,Config,f,r)).pacedSlant,"slant experiment repeated on consecutive plays")
+    end)
+    test("long-slant mix rejects known failed family low stamina missing depth and safe ordinary alternatives",function()
+        local f,r,p=defaultMiddleFixture()
+        p.recentSelections={{pass="Floater",shape="sideline",depth=26,side=1}}
+        local c=assert(Policy.chooseRoute(p,Config,f,r));assert(c.pacedSlant)
+        p.recentRoutes={{pass="Bullet",shape="slant",depth=c.depth,side=-c.side,
+            family=c.family,signature=c.signature,success=false,result="Swatted"}}
+        assert(not assert(Policy.chooseRoute(p,Config,f,r)).pacedSlant,"failed mirrored slant family was blindly retried")
+        p.recentRoutes=nil
+        for _,stamina in ipairs({0,30,50,75}) do
+            p.stamina=stamina;assert(not assert(Policy.chooseRoute(p,Config,f,r)).pacedSlant)
+        end
+        p.stamina=100;p.opponentPosition=nil
+        assert(not assert(Policy.chooseRoute(p,Config,f,r)).pacedSlant)
+        p.opponentPosition=Vector3.new(f.MidX,3,p.LOS+18*f.YD)
+        assert(assert(Policy.chooseRoute(p,Config,f,r)).adaptiveUnderneath,"deep observation was overridden by pass rotation")
+        p.opponentPosition=Vector3.new(f.MidX+500,3,p.LOS+5*f.YD)
+        local clear=assert(Policy.chooseRoute(p,Config,f,r))
+        assert(clear.pressureMode=="clearance" and not clear.pacedSlant,"mix displaced a positive-clearance option")
+    end)
+    test("paced long-slant movement walks first then commits sprint with field translation and throw handoff",function()
+        local f,r,p=defaultMiddleFixture();p.recentSelections={{pass="Floater",shape="sideline",depth=26,side=1}}
+        local c=assert(Policy.chooseRoute(p,Config,f,r));assert(c.pacedSlant)
+        p.role="WR";p.phase="Live";p.routePlan=c.plan;p.pacedSlant=true;p.slantWalkUntil=c.slantWalkUntil
+        p.position=Vector3.new(c.payload.StartX,3,p.LOS);p.elapsed=c.slantWalkUntil-.01
+        local before=assert(Policy.movement(p,Config,f,r))
+        assert(not before.sprint and not before.finalSprintCommitted);near(before.moveSpeed,Config.RunSpeed)
+        p.elapsed=c.slantWalkUntil
+        local after=assert(Policy.movement(p,Config,f,r))
+        assert(after.sprint and after.finalSprintCommitted);near(after.moveSpeed,Config.SprintSpeed)
+        p.finalSprintCommitted=true;p.elapsed=c.slantWalkUntil-.02
+        assert(Policy.movement(p,Config,f,r).sprint,"committed route dropped sprint because of clock jitter")
+        p.offset=Vector3.new(200,0,-300);p.position=p.position+p.offset
+        local translated=assert(Policy.movement(p,Config,f,r))
+        near(translated.target.X,after.target.X+p.offset.X);near(translated.target.Z,after.target.Z+p.offset.Z)
+        p.ballActive=true;assert(Policy.movement(p,Config,f,r)==nil)
+        p.ballActive=false;p.passStarted=true;assert(Policy.movement(p,Config,f,r)==nil)
+    end)
     test("default offense runs a real middle stem before a timed deep end-zone cut",function()
         local f,r,p=defaultMiddleFixture();local c=assert(Policy.chooseRoute(p,Config,f,r))
         assert(c.middleStemDeep and c.payload.Pass=="Floater" and c.routeStrategy=="sideline-dive")
@@ -223,6 +352,7 @@ return function(Policy,create,routeSource,policySource)
     end)
     test("repeated middle-stem selections vary finish side and actual turn timing",function()
         local f,r,p=defaultMiddleFixture();local history,sides,stems={},{},{}
+        p.adaptiveRoutes=false
         for i=1,12 do
             p.recentSelections=history;p.selectionIndex=i-1
             local c=assert(Policy.chooseRoute(p,Config,f,r));assert(c.middleStemDeep and c.finishReachable)
@@ -941,6 +1071,32 @@ return function(Policy,create,routeSource,policySource)
         p.opponentVelocity=nil;p.elapsed=nil
         assert(Policy.movement(p,Config,f,r).target.Z>=p.position.Z)
     end)
+    test("recorded WR setback preserves DB opening band through hike without extending later coverage",function()
+        local f,r=pressureFixture()
+        for _,bias in ipairs({0,2.5}) do
+            for _,offset in ipairs({Vector3.zero,Vector3.new(100,0,47.3)}) do
+                local p=input({role="DB",phase="Live",LOS=-19.45910851670435,offset=offset,
+                    elapsed=0,position=Vector3.new(18.893924713134766,4.636868,
+                        7.4953413009643555-(2.5-bias)*f.YD)+offset,
+                    opponentPosition=Vector3.new(18.893842697143555,4.636868,-21.42708396911621)+offset,
+                    opponentVelocity=Vector3.zero,defenseProfile={depthBiasYards=bias}})
+                for _,elapsed in ipairs({0,.109,.399}) do
+                    p.elapsed=elapsed;local d=Policy.movement(p,Config,f,r)
+                    near(d.target.Z,p.position.Z);assert(not d.sprint)
+                end
+                p.elapsed=.4;local later=Policy.movement(p,Config,f,r)
+                assert(later.target.Z<p.position.Z-f.YD and not later.sprint,
+                    "temporary LOS alignment changed established live coverage")
+                p.elapsed=nil
+                near(Policy.movement(p,Config,f,r).target.Z,later.target.Z)
+                p.elapsed=.1;p.opponentPosition=Vector3.new(p.opponentPosition.X,p.opponentPosition.Y,
+                    p.LOS+offset.Z+f.YD)
+                local forward=Policy.movement(p,Config,f,r)
+                p.elapsed=.4
+                near(Policy.movement(p,Config,f,r).target.Z,forward.target.Z)
+            end
+        end
+    end)
     test("DB deep-run forecast starts before recorded late recovery and retains normal reserve",function()
         local f,r=pressureFixture()
         local p=input({role="DB",phase="Live",elapsed=.502,LOS=-19.459,
@@ -1570,6 +1726,80 @@ return function(Policy,create,routeSource,policySource)
     test("near-deadline pre-snap bypasses the observation delay",function()
         local h=harness();h.api.setEnabled(true);h.snapshot.preSnapEnds=.6;h:tick(.2)
         assert(#h.submits==1,"close deadline was lost waiting for observation")
+    end)
+    test("visibly retreating defender extends observation only until deep threshold or three seconds",function()
+        local h=harness();h.api.setEnabled(true)
+        h.opponentRoot.Position=Vector3.new(3,3,15+8*Field.YD)
+        h.opponentRoot.AssemblyLinearVelocity=Vector3.new(0,0,12)
+        for _=1,8 do h:tick(.2) end
+        assert(h.attempts==0,"moving-deep defender was submitted against after only one second")
+        h.opponentRoot.Position=Vector3.new(3,3,15+14*Field.YD)
+        h:tick(.2);assert(#h.submits==1 and h.api.status().activeRoute.adaptiveUnderneath)
+        local bounded=harness();bounded.api.setEnabled(true)
+        bounded.opponentRoot.AssemblyLinearVelocity=Vector3.new(0,0,12)
+        for _=1,15 do bounded:tick(.2) end
+        assert(bounded.attempts==0)
+        bounded:tick(.25);assert(#bounded.submits==1,"observation exceeded its three-second bound")
+        local stopped=harness();stopped.api.setEnabled(true)
+        stopped.opponentRoot.AssemblyLinearVelocity=Vector3.new(0,0,12)
+        for _=1,8 do stopped:tick(.2) end
+        stopped.opponentRoot.AssemblyLinearVelocity=Vector3.zero
+        stopped:tick(.2);assert(#stopped.submits==1,"stopped defender retained a future-depth assumption")
+        local urgent=harness();urgent.api.setEnabled(true)
+        urgent.opponentRoot.AssemblyLinearVelocity=Vector3.new(0,0,12)
+        urgent.snapshot.preSnapEnds=.6;urgent:tick(.2)
+        assert(#urgent.submits==1,"moving defender observation missed the native deadline")
+    end)
+    test("underneath upright intent survives same-round reload and hands off only on confirmed possession",function()
+        local h=harness();h.api.setEnabled(true)
+        h.opponentRoot.Position=Vector3.new(3,3,15+18*Field.YD)
+        h:settle();local state=h.api.status()
+        assert(state.activeRoute.adaptiveUnderneath and state.activeRoute.requireDive==false)
+        assert(state.activeRoute.carryMoveReady and state.activeRoute.estimatedCatchStamina>=33)
+        assert(not h.api.catchIntent().requireDive and not h.api.catchIntent().deepFinish)
+        h:tick(.2);assert(h.api.status().message=="Full auto · Underneath: defender deep")
+        h.snapshot.phase="Live";h.snapshot.snapAt=h.time;h.snapshot.route=nil
+        h:navigate();assert(h.api.status().message=="Full auto · Underneath: defender deep")
+        local same=harness({saved="on",previousState=h.api.status(),time=h.time})
+        same.snapshot.phase="Live";same.snapshot.snapAt=h.time
+        same.api.status()
+        local intent=assert(same.api.catchIntent())
+        assert(not intent.requireDive and not intent.deepFinish and not intent.continuousSprint)
+        local other=harness({saved="on",previousState=state,time=h.time,jobId="different-job"})
+        assert(other.api.catchIntent()==nil,"a new server inherited active underneath catch intent")
+        h.snapshot.arc={};h.snapshot.passStarted=true
+        assert(h:navigate()==nil,"route navigation continued after throw")
+        h.api.onFx({Type="BallResult",Result="Catch",Catcher=h.character})
+        assert(h.api.catchIntent()==nil,"completed catch retained forced catch intent")
+        h.snapshot.arc=nil;h.snapshot.phase="RAC";h.snapshot.carrier=h.character
+        local carry=assert(h:navigate());assert(carry.message=="Full auto · carry" and carry.direction.Z>=0)
+        h.api.setEnabled(false);assert(h.api.catchIntent()==nil and h:navigate()==nil)
+    end)
+    test("paced slant submission preserves upright intent and native sprint timing across reload",function()
+        local h=harness();h.api.setEnabled(true);h:settle()
+        assert(h.api.status().activeRoute.pass=="Floater")
+        h.api.onFx({Type="BallResult",Result="Swatted"})
+        h.snapshot.preSnapEnds=30;h.boardOpen=true;h.api.onMatch({Phase="PreSnap"});h:settle()
+        local selected=assert(h.api.status().activeRoute)
+        assert(selected.pacedSlant and selected.requireDive==false and selected.carryMoveReady)
+        assert(h.api.catchIntent().requireDive==false and not h.api.catchIntent().continuousSprint)
+        h.snapshot.phase="Live";h.snapshot.snapAt=h.time
+        local snap=h.time
+        h.root.Position=Vector3.new(h.submits[2].StartX,3,15)
+        h.time=snap+selected.slantWalkUntil-.01
+        assert(not h:navigate().sprint)
+        h.time=snap+selected.slantWalkUntil
+        assert(h:navigate().sprint and h.api.catchIntent().continuousSprint)
+        h.snapshot.arc={};local old=h.api.status()
+        local same=harness({saved="on",previousState=old,time=h.time})
+        same.snapshot.preSnapEnds=30;same.snapshot.phase="Live";same.snapshot.snapAt=snap;same.snapshot.arc={}
+        same.api.status()
+        local intent=assert(same.api.catchIntent())
+        assert(intent.requireDive==false and intent.continuousSprint)
+        same.api.setEnabled(false);assert(same.api.catchIntent()==nil)
+        local other=harness({saved="on",previousState=old,time=h.time,jobId="another-job"})
+        other.snapshot.preSnapEnds=30;other.snapshot.phase="Live";other.api.status()
+        assert(other.api.catchIntent()==nil,"cross-server history restored a sprinting slant")
     end)
     test("B V menu text testing and team gates block setup and navigation",function()
         for _,gate in ipairs({"B","V","menu","text","test","team"}) do

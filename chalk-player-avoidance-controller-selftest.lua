@@ -10,6 +10,7 @@ return function(source)
     local cancelFactory=assert(compile([[
 return function(f)
     local navigation,ownsSprint=true,true
+    local navigationIdleSince,navigationIdleRoot=1,f.root
     local trackedSprintRoot,sprintTracking=f.root,f.tracking
     local steering,atTarget,parkedPosition=f.direction,true,f.root
     local controlledHumanoid=f.h
@@ -34,7 +35,7 @@ return function(f)
             and wrFake==nil and wrReturn==nil and not atTarget and parkedPosition==nil,
             steering=steering,controlledHumanoid=controlledHumanoid,ownsSprint=ownsSprint,
             tracking=sprintTracking,root=trackedSprintRoot,navigation=navigation,
-            avoidanceActive=avoidanceStatus.active}
+            avoidanceActive=avoidanceStatus.active,idleSince=navigationIdleSince,idleRoot=navigationIdleRoot}
     end
 end
 ]],"player-avoidance-cancel-fixture"))()
@@ -45,6 +46,8 @@ return function(s,ownsSprint,sprinting,controlledHumanoid)
     local factory=assert(compile([[
 return function(f)
     local steering,navigation,controlledHumanoid,ownsSprint
+    local navigationIdleSince,navigationIdleRoot
+    local jumped,dived,jumpRequest
     local trackedSprintRoot,sprintTracking
     local avoidanceState,avoidanceRoot,avoidancePhase,lastAvoidanceReason
     local avoidanceStatus={active=false,blocked=false}
@@ -75,7 +78,10 @@ return function(f)
     end}
 ]]..helpers..navigation..[[
     return {
-        navigate=function(s,dt) return updateFullplay(s,f.root,f.h,f.now,dt or 1/60) end,
+        navigate=function(s,dt)
+            jumped,dived,jumpRequest=f.jumped,f.dived,f.jumpRequest
+            return updateFullplay(s,f.root,f.h,f.now,dt or 1/60)
+        end,
         avoid=function(s,direction,requested,canDetour)
             return avoidPlayers(s,f.root,f.h,f.now,1/60,direction,requested,canDetour)
         end,
@@ -136,6 +142,69 @@ end
         close(f.moves[1],f.decision.direction);close(f.moves[2],f.decision.direction)
         equal(#f.sprintCalls,1);equal(f.sprintCalls[1],false)
         equal(f.api.status().blocked,true)
+    end)
+    test("confirmed Full Auto stop discards the old backward heading before forward coverage restarts",function()
+        local f=fixture()
+        f.directive={direction=Vector3.new(0,0,-1),sprint=false,preserveDepth=true}
+        f.api.navigate(f.context)
+        close(f.moves[#f.moves],Vector3.new(0,0,-1))
+        f.directive.direction=Vector3.zero
+        f.now=10.1;f.api.navigate(f.context)
+        f.now=10.24;f.api.navigate(f.context)
+        assert(f.helperCalls[#f.helperCalls].input.currentDirection,"short stop cleared heading early")
+        f.now=10.26;f.api.navigate(f.context)
+        equal(f.helperCalls[#f.helperCalls].input.currentDirection,nil)
+        equal(f.helperCalls[#f.helperCalls].previous,nil,"stale avoidance survived confirmed stop")
+        f.directive.direction=Vector3.new(0,0,1)
+        f.now=10.28;f.api.navigate(f.context)
+        close(f.moves[#f.moves],Vector3.new(0,0,1),"forward restart walked backward")
+        equal(f.sprinting,false)
+    end)
+    test("moving direction reversals retain the native controller turn bound",function()
+        local f=fixture()
+        f.directive={direction=Vector3.new(0,0,-1),sprint=false,preserveDepth=true}
+        f.api.navigate(f.context);f.root.AssemblyLinearVelocity=Vector3.new(0,0,-20)
+        f.directive.direction=Vector3.new(0,0,1);f.now=11;f.api.navigate(f.context)
+        local output=f.moves[#f.moves]
+        assert(output.Z<0,"moving reversal bypassed steering")
+        assert(output:Dot(Vector3.new(0,0,-1))>=math.cos(9/60)-1e-8,"turn exceeded9rad/sec")
+    end)
+    test("zero requested movement while coasting does not count as a confirmed stop",function()
+        local f=fixture()
+        f.directive={direction=Vector3.new(0,0,-1),sprint=false};f.api.navigate(f.context)
+        f.directive.direction=Vector3.zero;f.root.AssemblyLinearVelocity=Vector3.new(0,0,-2)
+        f.now=10.1;f.api.navigate(f.context);f.now=11;f.api.navigate(f.context)
+        f.directive.direction=Vector3.new(0,0,1);f.api.navigate(f.context)
+        assert(f.moves[#f.moves].Z<0,"coasting reset a live travel heading")
+    end)
+    test("movement resumption and root changes restart the idle confirmation interval",function()
+        for _,change in ipairs({"movement","root"}) do
+            local f=fixture();f.directive={direction=Vector3.new(0,0,-1),sprint=false}
+            f.api.navigate(f.context);f.directive.direction=Vector3.zero
+            f.now=10.1;f.api.navigate(f.context)
+            if change=="movement" then
+                f.now=10.2;f.directive.direction=Vector3.new(0,0,-1);f.api.navigate(f.context)
+            else
+                f.root={Position=Vector3.new(0,3,5),AssemblyLinearVelocity=Vector3.zero}
+            end
+            f.now=10.21;f.directive.direction=Vector3.zero;f.api.navigate(f.context)
+            f.now=10.3;f.directive.direction=Vector3.new(0,0,1);f.api.navigate(f.context)
+            assert(f.moves[#f.moves].Z<0,change.." reused an older idle interval")
+        end
+    end)
+    test("manual catch airborne and committed action states cannot clear navigation steering",function()
+        for _,gate in ipairs({"manual","arc","air","jumped","jumpRequest","dived"}) do
+            local f=fixture();f.directive={direction=Vector3.new(0,0,-1),sprint=false}
+            f.api.navigate(f.context)
+            if gate=="manual" then f.context.playBudget=nil
+            elseif gate=="arc" then f.context.arc={}
+            elseif gate=="air" then f.h.FloorMaterial="Air"
+            else f[gate]=true end
+            f.directive.direction=Vector3.zero
+            f.now=10.1;f.api.navigate(f.context);f.now=10.4;f.api.navigate(f.context)
+            f.directive.direction=Vector3.new(0,0,1);f.api.navigate(f.context)
+            assert(f.moves[#f.moves].Z<0,gate.." lost its existing steering")
+        end
     end)
     test("clear catch does not toggle an already-on sprint",function()
         local f=fixture();f.sprinting=true;f.api.catch(f.context);f.api.catch(f.context)
@@ -247,6 +316,7 @@ end
         equal(#f.sprintCalls,0);equal(#f.moves,0);equal(f.inputReleased,nil)
         equal(state.controlledHumanoid,f.h);equal(state.ownsSprint,true)
         equal(state.tracking,f.tracking);equal(state.root,f.root);close(state.steering,f.direction)
+        equal(state.idleSince,nil);equal(state.idleRoot,nil)
         equal(f.sprinting,true)
     end)
     test("normal cancellation clears catch actions and releases movement",function()
@@ -258,6 +328,7 @@ end
         equal(#f.moves,1);close(f.moves[1],Vector3.zero)
         equal(state.controlledHumanoid,nil);equal(state.ownsSprint,false)
         equal(state.tracking,nil);equal(state.root,nil);equal(state.steering,nil)
+        equal(state.idleSince,nil);equal(state.idleRoot,nil)
         equal(state.avoidanceActive,false)
     end)
     test("throw handoff requires Full Auto and a live owned sprint",function()

@@ -34,6 +34,7 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
     local tackleAssist,catching,navigation=false,false,false
     local carrierAssist
     local avoidanceState,avoidanceRoot,avoidancePhase,lastAvoidanceReason
+    local navigationIdleSince,navigationIdleRoot
     local avoidanceStatus={active=false,blocked=false}
     local lastAvoidanceLog=0
     pcall(function() controls=require(me.PlayerScripts:WaitForChild("PlayerModule",3)):GetControls() end)
@@ -113,7 +114,7 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
         fields = fields or {}
         if fields.defenderAt==math.huge or fields.defenderAt==-math.huge then fields.defenderAt=nil end
         fields.kind, fields.time = kind, workspace:GetServerTimeNow()
-        fields.version="2.47"
+        fields.version="2.48"
         fields.launchAt=fields.launchAt or throwKey
         table.insert(history, fields)
         if #history > 80 then table.remove(history, 1) end
@@ -143,6 +144,7 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
     end
     local function release()
         navigation=false
+        navigationIdleSince,navigationIdleRoot=nil,nil
         avoidanceState,avoidanceRoot,avoidancePhase,lastAvoidanceReason=nil,nil,nil,nil
         avoidanceStatus={active=false,blocked=false}
         if carrierAssist then carrierAssist.cancel() end
@@ -155,6 +157,7 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
         releaseInput()
     end
     local function cancel(preserveMovement)
+        navigationIdleSince,navigationIdleRoot=nil,nil
         if preserveMovement then
             -- A running Full Auto route hands its existing native sprint to
             -- ball pursuit. Do not send a false/true sprint pair at the throw.
@@ -408,12 +411,21 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
     end
     local function updateFullplay(s,root,h,now,dt)
         if type(ctx.fullplay)~="function" or not root or not h
-            or h.PlatformStand or not Moves.Upright() then return false end
+            or h.PlatformStand or not Moves.Upright() then
+            navigationIdleSince,navigationIdleRoot=nil,nil
+            return false
+        end
         local directive=ctx.fullplay(s,root,h,now,dt)
         local direction=type(directive)=="table" and directive.direction or nil
-        if typeof(direction)~="Vector3" then return false end
+        if typeof(direction)~="Vector3" then
+            navigationIdleSince,navigationIdleRoot=nil,nil
+            return false
+        end
         for _,component in ipairs({direction.X,direction.Y,direction.Z}) do
-            if component~=component or math.abs(component)==math.huge then return false end
+            if component~=component or math.abs(component)==math.huge then
+                navigationIdleSince,navigationIdleRoot=nil,nil
+                return false
+            end
         end
         local flat=direction*Vector3.new(1,0,1)
         local strength=math.min(flat.Magnitude,1)
@@ -422,9 +434,28 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
         if carrierAssist then
             local active,note=carrierAssist.update(s,root,h,now)
             if active then
+                navigationIdleSince,navigationIdleRoot=nil,nil
                 releaseSprint()
                 return true,note
             end
+        end
+        local velocity=root.AssemblyLinearVelocity
+        local stopped=s.playBudget~=nil and not s.arc and not jumped and not jumpRequest and not dived
+            and h.FloorMaterial~=Enum.Material.Air and strength<.001
+            and typeof(velocity)=="Vector3" and (velocity*Vector3.new(1,0,1)).Magnitude<1
+        if stopped then
+            if navigationIdleRoot~=root or not navigationIdleSince or now<navigationIdleSince then
+                navigationIdleRoot,navigationIdleSince=root,now
+            elseif now-navigationIdleSince>=.15 then
+                -- A settled stop has no previous travel direction. Retaining
+                -- one can restart forward coverage by walking backward first.
+                -- Moving reversals and committed catch actions keep smoothing.
+                steering=nil
+                avoidanceState,avoidanceRoot,avoidancePhase,lastAvoidanceReason=nil,nil,nil,nil
+                avoidanceStatus={active=false,blocked=false}
+            end
+        else
+            navigationIdleSince,navigationIdleRoot=nil,nil
         end
         local budget=sprintBudget(s)
         local avoid=avoidPlayers(s,root,h,now,dt,flat,strength>0.001 and directive.sprint==true and budget.canSprint,true)
@@ -1120,6 +1151,6 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
         touchedConnection:Disconnect()
         cancel()
     end
-    log("loaded",{version="2.47",nativeDive=nativeDive~=nil,nativeGrab=nativeGrabTarget~=nil})
+    log("loaded",{version="2.48",nativeDive=nativeDive~=nil,nativeGrab=nativeGrabTarget~=nil})
     return controller
 end
