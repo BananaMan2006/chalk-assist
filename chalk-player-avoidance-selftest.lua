@@ -265,5 +265,126 @@ return function(Avoidance)
         assert(d.blocked)
         p.now=1;state,d=Avoidance.update(state,p);assert(not d.blocked and #state.samples==1)
     end)
+    test("recorded8892 clear passing heading retains an explicitly requested native sprint",function()
+        local bypass=Vector3.new(.837928056716919,0,.5457807183265686).Unit
+        for _,speed in ipairs({20,27}) do
+            local p=fixture({now=.2,walkSpeed=speed,allowSprintDetour=true,sprintSpeed=27,
+                position=Vector3.new(35.56631088256836,4.636868,42.002105712890625),
+                desiredDirection=Vector3.new(.3488311767578125,0,.9371855854988098).Unit,
+                currentDirection=bypass,bounds={minX=-29.712,maxX=67.5,minZ=-43.512,maxZ=151.912},
+                opponents={{position=Vector3.new(30.28558921813965,4.636789,42.14754867553711),
+                    velocity=Vector3.new(19.106891632080078,0,-5.664046287536621)}}})
+            local old={active=true,heading=bypass,side=1,clearSince=.18}
+            local state,d=Avoidance.update(old,p)
+            assert(d.active and d.sprint and not d.blocked and d.reason=="holding passing side")
+            same(d.direction,bypass);same(state.heading,bypass)
+            p.allowSprintDetour=false
+            local _,default=Avoidance.update(old,p)
+            assert(default.active and not default.sprint)
+            same(default.direction,bypass*(20/speed))
+        end
+    end)
+    test("explicit opt out is identical to default across a moving detour",function()
+        local a,b
+        local p=fixture({opponents={{position=Vector3.new(0,0,8),velocity=Vector3.zero}}})
+        for _=1,50 do
+            p.allowSprintDetour=nil
+            local da;a,da=Avoidance.update(a,p)
+            p.allowSprintDetour=false;p.sprintSpeed=27
+            local db;b,db=Avoidance.update(b,p)
+            same(da.direction,db.direction)
+            assert(da.sprint==db.sprint and da.active==db.active and da.blocked==db.blocked
+                and da.reason==db.reason and a.side==b.side)
+            p.position=p.position+da.direction*p.walkSpeed*p.dt
+            p.now=p.now+p.dt;p.currentDirection=a.heading or p.desiredDirection
+        end
+    end)
+    test("prospective27 collision slows a path that is clear at current20",function()
+        local p=fixture({walkSpeed=20,allowSprintDetour=true,sprintSpeed=27,
+            opponents={{position=Vector3.new(0,0,10),velocity=Vector3.zero}}})
+        local _,d=Avoidance.update(nil,p)
+        assert(d.active and not d.sprint,"sprint safety reused walking-only clearance")
+        assert(d.direction.Magnitude<=1);legal(p,d.direction)
+    end)
+    test("actual20 crossing still slows even when prospective27 would escape",function()
+        local p=fixture({dt=.004,walkSpeed=20,allowSprintDetour=true,sprintSpeed=27,
+            opponents={{position=Vector3.new(-6,0,1),velocity=Vector3.new(20,0,0)}}})
+        local _,d=Avoidance.update(nil,p)
+        assert(d.active and not d.sprint,"prospective clearance hid the current-speed collision")
+    end)
+    test("prospective lookahead includes obstacles beyond slowed native speed shortlist",function()
+        local p=fixture({walkSpeed=8,allowSprintDetour=true,sprintSpeed=27,
+            opponents={{position=Vector3.new(0,0,9.6),velocity=Vector3.zero}}})
+        local _,d=Avoidance.update(nil,p)
+        assert(d.active and not d.sprint,"future sprint obstacle was excluded by current slow speed")
+    end)
+    test("sprint option never spends sprint during contact or measured physical blocking",function()
+        local p=fixture({allowSprintDetour=true,sprintSpeed=27});local state,d
+        for i=0,9 do
+            p.now=i*.05;p.dt=.05;p.position=Vector3.new(0,0,p.now*(.77/.43))
+            p.velocity=Vector3.new(0,0,27)
+            p.opponents={{position=p.position+Vector3.new(0,0,3.7),velocity=Vector3.zero}}
+            state,d=Avoidance.update(state,p)
+            assert(d.active and not d.sprint,"contact escape retained sprint")
+        end
+        assert(d.blocked and d.progressSpeed<2)
+    end)
+    test("held sprint heading is rejected when only prospective speed leaves bounds",function()
+        local heading=Vector3.new(1,0,1).Unit
+        local p=fixture({now=.2,position=Vector3.new(5,0,0),walkSpeed=20,
+            currentDirection=heading,allowSprintDetour=true,sprintSpeed=27,
+            bounds={minX=-20,maxX=9.5,minZ=-20,maxZ=50}})
+        local _,d=Avoidance.update({active=true,heading=heading,side=1,clearSince=.18},p)
+        assert(d.active and not d.sprint and d.reason=="holding passing side")
+        same(d.direction,heading);legal(p,d.direction)
+    end)
+    test("safe sprint return keeps bounded turns and original analog strength",function()
+        local old=Vector3.new(1,0,1).Unit
+        local p=fixture({now=.2,walkSpeed=20,desiredDirection=Vector3.new(0,0,.6),
+            currentDirection=old,allowSprintDetour=true,sprintSpeed=27})
+        local state,d=Avoidance.update({active=true,heading=old,side=1,clearSince=0},p)
+        assert(d.active and d.sprint and d.reason=="returning to path")
+        assert(math.abs(d.direction.Magnitude-.6)<1e-6)
+        assert(math.acos(math.clamp(state.heading:Dot(old),-1,1))<=8*p.dt+1e-6)
+        p.requestedSprint=false
+        local _,off=Avoidance.update({active=true,heading=old,side=1,clearSince=0},p)
+        assert(not off.sprint and off.direction.Magnitude<=.6+1e-6)
+    end)
+    test("sprint exception requires an explicit valid native speed and preserves action priority",function()
+        local heading=Vector3.new(1,0,1).Unit
+        local p=fixture({now=.2,currentDirection=heading,allowSprintDetour=true})
+        local state={active=true,heading=heading,side=1,clearSince=.18}
+        for _,speed in ipairs({false,0,0/0,19}) do
+            p.sprintSpeed=speed
+            local _,d=Avoidance.update(state,p);assert(d.active and not d.sprint)
+        end
+        p.sprintSpeed=27;p.canDetour=false
+        local reset,d=Avoidance.update(state,p)
+        assert(next(reset)==nil and not d.active and d.sprint)
+        same(d.direction,p.desiredDirection)
+    end)
+    test("opted in sprint bypass clears blocker without entering capsule or switching sides",function()
+        local p=fixture({allowSprintDetour=true,sprintSpeed=27,
+            opponents={{position=Vector3.new(0,0,8),velocity=Vector3.zero}}})
+        local goal=Vector3.new(0,0,35)
+        local state,side,minDistance=nil,nil,math.huge
+        local sprintDetour,slowTurn,clear=false,false,false
+        for _=1,160 do
+            p.desiredDirection=(goal-p.position).Unit
+            local d;state,d=Avoidance.update(state,p)
+            if d.active then
+                if d.sprint then sprintDetour=true else slowTurn=true end
+                if d.side then side=side or d.side;assert(d.side==side) end
+            elseif sprintDetour then clear=true end
+            legal(p,d.direction)
+            p.position=p.position+d.direction*p.walkSpeed*p.dt
+            minDistance=math.min(minDistance,(p.position-p.opponents[1].position).Magnitude)
+            p.walkSpeed=d.sprint and 27 or 20
+            p.currentDirection=state.heading or p.desiredDirection;p.now=p.now+p.dt
+            if clear and p.position.Z>16 then break end
+        end
+        assert(sprintDetour and slowTurn and clear,"did not exercise slow turn and safe sprint bypass")
+        assert(minDistance>=3.6,"retaining sprint entered the physical capsule")
+    end)
     return report
 end

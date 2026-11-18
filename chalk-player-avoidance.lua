@@ -65,6 +65,12 @@ function Avoidance.update(previous,input)
     local speed=clamp(finite(input.walkSpeed) and input.walkSpeed or 20,0,60)
     local run=clamp(finite(input.runSpeed) and input.runSpeed or 20,1,60)
     local walkSpeed=math.min(speed,run)
+    -- Only an explicitly opted-in final sprint can retain sprint on a detour.
+    -- The caller still owns stamina, role, and committed-action priorities.
+    local sprintSpeed=finite(input.sprintSpeed) and clamp(input.sprintSpeed,0,60) or nil
+    local sprintEligible=input.allowSprintDetour==true and requested and speed>0
+        and sprintSpeed~=nil and sprintSpeed>=run
+    local lookupSpeed=sprintEligible and math.max(speed,sprintSpeed) or speed
     local radius=clamp(finite(input.clearance) and input.clearance or 3.75,2,6)
     local horizon=clamp(finite(input.lookahead) and input.lookahead or .25,.1,.3)
     local height=clamp(finite(input.verticalClearance) and input.verticalClearance or 5,2,8)
@@ -93,7 +99,7 @@ function Avoidance.update(previous,input)
             local relative=(other.position-position)*FLAT
             local velocity=vec(other.velocity) and other.velocity*FLAT or ZERO
             if velocity.Magnitude>40 then velocity=velocity.Unit*40 end
-            if relative.Magnitude<=radius+(speed+velocity.Magnitude)*horizon+3 then
+            if relative.Magnitude<=radius+(lookupSpeed+velocity.Magnitude)*horizon+3 then
                 obstacles[#obstacles+1]={relative=relative,velocity=velocity}
                 nearest=math.min(nearest,relative.Magnitude)
             end
@@ -121,6 +127,17 @@ function Avoidance.update(previous,input)
                 gap,approaching,approachHeading=currentGap,true,current
             end
         end
+        if sprintEligible then
+            -- A currently walking character may receive native sprint speed
+            -- on the next frame; that prospective path must also be clear.
+            for _,direction in ipairs({heading,current}) do
+                local futureVelocity=other.velocity-direction*(sprintSpeed*strength)
+                local futureGap=clearance(other.relative,futureVelocity,horizon)
+                if futureGap<gap and other.relative:Dot(futureVelocity)<-.001 then
+                    gap,approaching,approachHeading=futureGap,true,direction
+                end
+            end
+        end
         if gap<radius and approaching and other.relative:Dot(approachHeading)>=-radius*.4 then
             threat=true
             if not closestDistance or gap<closestDistance then closestThreat,closestDistance=other,gap end
@@ -142,6 +159,14 @@ function Avoidance.update(previous,input)
         end
         return escaping,minimum,true
     end
+    local function keepSprint(direction)
+        if not sprintEligible or blocked or touching then return false end
+        -- Test the actual bounded heading, not the final candidate heading.
+        -- Neither an overlapping escape nor a path safe only at walking
+        -- speed can spend sprint while turning around the other player.
+        return evaluate(direction,speed*strength)
+            and evaluate(direction,sprintSpeed*strength)
+    end
 
     if not threat and not blocked then
         local old=state.active and state.heading or nil
@@ -153,14 +178,19 @@ function Avoidance.update(previous,input)
             -- threatened frames cannot reverse the turn on every heartbeat.
             if now-state.clearSince<.12 then
                 local safe=evaluate(old.Unit,speed*amount)
-                if safe then
+                local sprint=keepSprint(old.Unit)
+                if safe or sprint then
                     state.heading,state.active=old.Unit,true
-                    return state,decision(old.Unit*amount,false,true,false,"holding passing side",
+                    return state,decision(old.Unit*(sprint and strength or amount),sprint,true,false,"holding passing side",
                         {side=state.side,progressSpeed=measured})
                 end
             end
             local returning=turn(old.Unit,heading,turnRate*dt,state.side)
             state.heading,state.active=returning,true
+            if keepSprint(returning) then
+                return state,decision(returning*strength,true,true,false,"returning to path",
+                    {side=state.side,progressSpeed=measured})
+            end
             local safeAmount=0
             for _,fraction in ipairs({1,.75,.5,.25,.125}) do
                 local safe=evaluate(returning,speed*amount*fraction)
@@ -220,6 +250,11 @@ function Avoidance.update(previous,input)
     state.side=chosen.side
     local from=state.active and vec(state.heading) and state.heading.Magnitude>.001 and state.heading.Unit or current
     local steered=turn(from,chosen.direction,turnRate*dt,state.side)
+    if keepSprint(steered) then
+        state.heading,state.active=steered,true
+        return state,decision(steered*strength,true,true,false,"passing player",
+            {side=state.side,progressSpeed=measured})
+    end
     local amount=speed>0 and strength*walkSpeed/speed or strength
     local safeAmount
     for _,fraction in ipairs({1,.75,.5,.25,.125}) do

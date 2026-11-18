@@ -113,7 +113,7 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
         fields = fields or {}
         if fields.defenderAt==math.huge or fields.defenderAt==-math.huge then fields.defenderAt=nil end
         fields.kind, fields.time = kind, workspace:GetServerTimeNow()
-        fields.version="2.45"
+        fields.version="2.46"
         fields.launchAt=fields.launchAt or throwKey
         table.insert(history, fields)
         if #history > 80 then table.remove(history, 1) end
@@ -376,6 +376,9 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
             position=root.Position,velocity=root.AssemblyLinearVelocity,desiredDirection=direction,
             opponents=opponents,bounds=bounds,requestedSprint=requestedSprint,walkSpeed=h.WalkSpeed,
             runSpeed=Config.RunSpeed,currentDirection=steering,
+            sprintSpeed=Config.SprintSpeed,
+            allowSprintDetour=s.role=="WR" and s.phase=="Live" and s.catchIntent~=nil
+                and s.catchIntent.continuousSprint==true,
             canDetour=canDetour and h.FloorMaterial~=Enum.Material.Air and not h.PlatformStand})
         -- The avoidance helper already limits its turns and checks that path.
         -- A second smoother could turn back inside the checked clearance.
@@ -1117,6 +1120,6 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
         touchedConnection:Disconnect()
         cancel()
     end
-    log("loaded",{version="2.45",nativeDive=nativeDive~=nil,nativeGrab=nativeGrabTarget~=nil})
+    log("loaded",{version="2.46",nativeDive=nativeDive~=nil,nativeGrab=nativeGrabTarget~=nil})
     return controller
 end

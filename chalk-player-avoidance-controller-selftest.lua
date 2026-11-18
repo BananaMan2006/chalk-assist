@@ -50,7 +50,7 @@ return function(f)
     local avoidanceStatus={active=false,blocked=false}
     local lastAvoidanceLog=0
     local Field={MinX=-30,MaxX=30,BackZ=0,EndZ=120}
-    local Config={RunSpeed=20}
+    local Config={RunSpeed=20,SprintSpeed=27}
     local Enum={Material={Air="Air"}}
     local ctx={fullplay=function() return f.directive end}
     local me={GetAttribute=function(_,key)
@@ -195,6 +195,38 @@ end
         local active,note=f.api.navigate(f.context)
         equal(active,true);equal(note,"carrier burst");equal(#f.helperCalls,0);equal(#f.moves,0)
         equal(f.sprinting,false)
+    end)
+    test("only the committed live WR route opts into checked sprint detours",function()
+        local f=fixture();f.context.role="WR";f.context.catchIntent={continuousSprint=true}
+        f.api.catch(f.context)
+        equal(f.helperCalls[1].input.allowSprintDetour,true)
+        equal(f.helperCalls[1].input.sprintSpeed,27)
+        f.context.role="DB";f.api.catch(f.context)
+        equal(f.helperCalls[2].input.allowSprintDetour,false)
+        f.context.role="WR";f.context.phase="RAC";f.api.catch(f.context)
+        equal(f.helperCalls[3].input.allowSprintDetour,false)
+        f.context.phase="Live";f.context.catchIntent.continuousSprint=false;f.api.catch(f.context)
+        equal(f.helperCalls[4].input.allowSprintDetour,false)
+        f.context.catchIntent=nil;f.api.catch(f.context)
+        equal(f.helperCalls[5].input.allowSprintDetour,false)
+    end)
+    test("WR sprint detour permission preserves budget and catch action gates",function()
+        local f=fixture();f.context.role="WR";f.context.catchIntent={continuousSprint=true}
+        f.canSprint=false;f.api.catch(f.context)
+        equal(f.helperCalls[1].input.allowSprintDetour,true)
+        equal(f.helperCalls[1].input.requestedSprint,false)
+        f.canSprint=true;f.plan.jumpAt=10.2;f.api.catch(f.context)
+        equal(f.helperCalls[2].input.canDetour,false)
+        f.context.playBudget=nil;f.api.catch(f.context)
+        equal(#f.helperCalls,2)
+    end)
+    test("committed WR navigation retains a helper-approved active sprint",function()
+        local f=fixture();f.context.role="WR";f.context.catchIntent={continuousSprint=true}
+        f.directive={direction=Vector3.new(0,0,1),sprint=true}
+        f.decision={direction=Vector3.new(.6,0,.8),sprint=true,active=true,blocked=false}
+        f.api.navigate(f.context)
+        equal(f.helperCalls[1].input.allowSprintDetour,true)
+        equal(f.sprinting,true);close(f.moves[1],f.decision.direction)
     end)
     test("roster duplicates are inspected once and field offset reaches helper",function()
         local f=fixture()

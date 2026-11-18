@@ -146,7 +146,7 @@ local function auditMatch(kind,data)
             end
         end
         appendfile("ciu_match_audit.jsonl",game:GetService("HttpService"):JSONEncode({
-            kind=kind,version="2.45",time=workspace:GetServerTimeNow(),jobId=game.JobId,
+            kind=kind,version="2.46",time=workspace:GetServerTimeNow(),jobId=game.JobId,
             selectedQueue=state and state.selectedMode,phase=phase,role=role,
             fullAuto=fullAutoState,
             fields=fields,rankAttributes=observedRank()})..string.char(10))
@@ -979,7 +979,7 @@ end
 function api.status()
     local ch = characterOf(opponent)
     local holder,isEnemy,holderRole=carrierContext()
-    return {version="2.45", enabled=enabled, role=role or "unknown",rawRole=rawRole or "unknown", phase=phase,
+    return {version="2.46", enabled=enabled, role=role or "unknown",rawRole=rawRole or "unknown", phase=phase,
         ui={visible=windowVisible,minimized=minimized,x=panel.Position.X.Offset,y=panel.Position.Y.Offset},
         matchAlerts={enabled=alertSettings.enabled,saveError=alertSettings.saveError},
         idleGuard=idleGuard and idleGuard.status() or nil,
@@ -2822,6 +2822,12 @@ function Avoidance.update(previous,input)
     local speed=clamp(finite(input.walkSpeed) and input.walkSpeed or 20,0,60)
     local run=clamp(finite(input.runSpeed) and input.runSpeed or 20,1,60)
     local walkSpeed=math.min(speed,run)
+    -- Only an explicitly opted-in final sprint can retain sprint on a detour.
+    -- The caller still owns stamina, role, and committed-action priorities.
+    local sprintSpeed=finite(input.sprintSpeed) and clamp(input.sprintSpeed,0,60) or nil
+    local sprintEligible=input.allowSprintDetour==true and requested and speed>0
+        and sprintSpeed~=nil and sprintSpeed>=run
+    local lookupSpeed=sprintEligible and math.max(speed,sprintSpeed) or speed
     local radius=clamp(finite(input.clearance) and input.clearance or 3.75,2,6)
     local horizon=clamp(finite(input.lookahead) and input.lookahead or .25,.1,.3)
     local height=clamp(finite(input.verticalClearance) and input.verticalClearance or 5,2,8)
@@ -2850,7 +2856,7 @@ function Avoidance.update(previous,input)
             local relative=(other.position-position)*FLAT
             local velocity=vec(other.velocity) and other.velocity*FLAT or ZERO
             if velocity.Magnitude>40 then velocity=velocity.Unit*40 end
-            if relative.Magnitude<=radius+(speed+velocity.Magnitude)*horizon+3 then
+            if relative.Magnitude<=radius+(lookupSpeed+velocity.Magnitude)*horizon+3 then
                 obstacles[#obstacles+1]={relative=relative,velocity=velocity}
                 nearest=math.min(nearest,relative.Magnitude)
             end
@@ -2878,6 +2884,17 @@ function Avoidance.update(previous,input)
                 gap,approaching,approachHeading=currentGap,true,current
             end
         end
+        if sprintEligible then
+            -- A currently walking character may receive native sprint speed
+            -- on the next frame; that prospective path must also be clear.
+            for _,direction in ipairs({heading,current}) do
+                local futureVelocity=other.velocity-direction*(sprintSpeed*strength)
+                local futureGap=clearance(other.relative,futureVelocity,horizon)
+                if futureGap<gap and other.relative:Dot(futureVelocity)<-.001 then
+                    gap,approaching,approachHeading=futureGap,true,direction
+                end
+            end
+        end
         if gap<radius and approaching and other.relative:Dot(approachHeading)>=-radius*.4 then
             threat=true
             if not closestDistance or gap<closestDistance then closestThreat,closestDistance=other,gap end
@@ -2899,6 +2916,14 @@ function Avoidance.update(previous,input)
         end
         return escaping,minimum,true
     end
+    local function keepSprint(direction)
+        if not sprintEligible or blocked or touching then return false end
+        -- Test the actual bounded heading, not the final candidate heading.
+        -- Neither an overlapping escape nor a path safe only at walking
+        -- speed can spend sprint while turning around the other player.
+        return evaluate(direction,speed*strength)
+            and evaluate(direction,sprintSpeed*strength)
+    end
 
     if not threat and not blocked then
         local old=state.active and state.heading or nil
@@ -2910,14 +2935,19 @@ function Avoidance.update(previous,input)
             -- threatened frames cannot reverse the turn on every heartbeat.
             if now-state.clearSince<.12 then
                 local safe=evaluate(old.Unit,speed*amount)
-                if safe then
+                local sprint=keepSprint(old.Unit)
+                if safe or sprint then
                     state.heading,state.active=old.Unit,true
-                    return state,decision(old.Unit*amount,false,true,false,"holding passing side",
+                    return state,decision(old.Unit*(sprint and strength or amount),sprint,true,false,"holding passing side",
                         {side=state.side,progressSpeed=measured})
                 end
             end
             local returning=turn(old.Unit,heading,turnRate*dt,state.side)
             state.heading,state.active=returning,true
+            if keepSprint(returning) then
+                return state,decision(returning*strength,true,true,false,"returning to path",
+                    {side=state.side,progressSpeed=measured})
+            end
             local safeAmount=0
             for _,fraction in ipairs({1,.75,.5,.25,.125}) do
                 local safe=evaluate(returning,speed*amount*fraction)
@@ -2977,6 +3007,11 @@ function Avoidance.update(previous,input)
     state.side=chosen.side
     local from=state.active and vec(state.heading) and state.heading.Magnitude>.001 and state.heading.Unit or current
     local steered=turn(from,chosen.direction,turnRate*dt,state.side)
+    if keepSprint(steered) then
+        state.heading,state.active=steered,true
+        return state,decision(steered*strength,true,true,false,"passing player",
+            {side=state.side,progressSpeed=measured})
+    end
     local amount=speed>0 and strength*walkSpeed/speed or strength
     local safeAmount
     for _,fraction in ipairs({1,.75,.5,.25,.125}) do
@@ -3315,7 +3350,7 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
         fields = fields or {}
         if fields.defenderAt==math.huge or fields.defenderAt==-math.huge then fields.defenderAt=nil end
         fields.kind, fields.time = kind, workspace:GetServerTimeNow()
-        fields.version="2.45"
+        fields.version="2.46"
         fields.launchAt=fields.launchAt or throwKey
         table.insert(history, fields)
         if #history > 80 then table.remove(history, 1) end
@@ -3578,6 +3613,9 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
             position=root.Position,velocity=root.AssemblyLinearVelocity,desiredDirection=direction,
             opponents=opponents,bounds=bounds,requestedSprint=requestedSprint,walkSpeed=h.WalkSpeed,
             runSpeed=Config.RunSpeed,currentDirection=steering,
+            sprintSpeed=Config.SprintSpeed,
+            allowSprintDetour=s.role=="WR" and s.phase=="Live" and s.catchIntent~=nil
+                and s.catchIntent.continuousSprint==true,
             canDetour=canDetour and h.FloorMaterial~=Enum.Material.Air and not h.PlatformStand})
         -- The avoidance helper already limits its turns and checks that path.
         -- A second smoother could turn back inside the checked clearance.
@@ -4319,7 +4357,7 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
         touchedConnection:Disconnect()
         cancel()
     end
-    log("loaded",{version="2.45",nativeDive=nativeDive~=nil,nativeGrab=nativeGrabTarget~=nil})
+    log("loaded",{version="2.46",nativeDive=nativeDive~=nil,nativeGrab=nativeGrabTarget~=nil})
     return controller
 end
 
@@ -5971,7 +6009,7 @@ return function(ctx,Policy,services)
     local api={}
     local function log(kind,data)
         if type(append)~="function" then return end
-        data=data or {};data.kind=kind;data.time=world:GetServerTimeNow();data.version="2.45"
+        data=data or {};data.kind=kind;data.time=world:GetServerTimeNow();data.version="2.46"
         pcall(function() append("ciu_fullplay_events.jsonl",http:JSONEncode(data)..string.char(10)) end)
     end
     local function pauseReason(s)
@@ -7180,4 +7218,4 @@ if type(writefile)=="function" then
         end
     end)
 end
-print("Chalk Assist 2.45 loaded. Full Auto preserves defensive stamina and varies legal routes. Idle protection runs automatically. Drag / minimize / Right Shift hide. V assist / B all / F8 unload.")
+print("Chalk Assist 2.46 loaded. Full Auto preserves defensive stamina and varies legal routes. Idle protection runs automatically. Drag / minimize / Right Shift hide. V assist / B all / F8 unload.")
