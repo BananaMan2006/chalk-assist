@@ -350,6 +350,7 @@ function Planner.solve(s)
         +math.max(cfg(s,"CatchRadius",3.75),cfg(s,"DiveCatchRadius",2.5))
         +math.max(0,-(s.margin or 0.3))
     local wr=s.role=="WR"
+    local scoringIntent=wr and finite(s.preferGoalZ)
     local defenderAt,defenderKnown,observedDefenderAt
     local retainedDeadline=wr and finite(s.defenderDeadline)
         and s.defenderDeadline>=s.launchAt+0.12 and s.defenderDeadline or nil
@@ -408,7 +409,11 @@ function Planner.solve(s)
             -- Once contested, waiting for a grounded catch can hand the ball
             -- to the defender: compare time instead, with small action biases.
             local actionTier=p.diveAt and 2 or (p.jumpAt and 1 or 0)
-            local tier=contested and 3 or actionTier
+            local intentTouch=scoringIntent and (candidate.rootTarget.Z>=s.preferGoalZ
+                or s.position.Z>=s.preferGoalZ) and Planner.firstTouch(s,candidate) or nil
+            local scoringCatch=intentTouch and intentTouch.root.Z>=s.preferGoalZ
+            local tier=contested and (scoringIntent and 6 or 3)
+                or actionTier+(scoringIntent and not scoringCatch and 3 or 0)
             if tier>bestTier then return end
             local contestedOrder
             if tier==bestTier and contested and best then
@@ -432,7 +437,7 @@ function Planner.solve(s)
             -- touch progress; avoid path scans that cannot improve the result.
             if tier==bestTier and not contested and s.arc.P1.Z>=s.arc.P0.Z
                 and candidate.contactPosition.Z<bestProgress-0.03 then return end
-            local touch=Planner.firstTouch(s,candidate)
+            local touch=intentTouch or Planner.firstTouch(s,candidate)
             if not inBounds(s,touch.root) then return end
             local better=tier<bestTier or not best
             if not better and tier==bestTier then
@@ -451,6 +456,7 @@ function Planner.solve(s)
                 candidate.safety=not defenderKnown and "unknown" or (contested and "contested" or "clear")
                 candidate.safetyBasis="Possible defender reach estimate; server outcome is not guaranteed"
                 candidate.prematureContact=touch.at<candidate.contactAt-0.06
+                candidate.scoringCatch=scoringCatch==true
                 best,bestTier,bestProgress=candidate,tier,touch.progress
             end
             return
@@ -571,11 +577,17 @@ function Planner.solve(s)
     end
     if s.role=="WR" then
         search(true,false)
-        -- WR stays upright whenever any running/jumping catch is reachable.
-        -- Defender pressure alone must never turn that catch into a dive.
-        if not best then
+        -- Ordinary WR assistance remains upright-first. A submitted deep
+        -- scoring route may use a clear diving goal-line catch over a shorter
+        -- upright catch; contested deep windows never outrank clear catches.
+        if not best or scoringIntent and not best.scoringCatch and best.safety~="contested" then
             search(false,true)
-            if best then best.diveReason="No reachable upright catch" end
+            if best and best.diveAt then
+                best.diveReason=scoringIntent and "Timed full-auto deep catch" or "No reachable upright catch"
+            end
+        end
+        if scoringIntent and best and best.diveAt then
+            best.diveReason="Timed full-auto deep catch"
         end
     else
         search(true,true)
@@ -660,6 +672,39 @@ function Planner.solve(s)
     return best,best and (best.risk and "Last-resort native contact attempt"
         or (chase and "Earliest reachable contact" or "Reachable local contact"))
         or (chase and "No reachable interception predicted" or "No safe local interception predicted"),threat
+end
+
+-- Pace an otherwise early upright arrival while preserving its real contact
+-- witness. This uses ordinary analog movement, never a speed increase. Unsafe
+-- or very slow pacing falls back to the original catch/route approach.
+function Planner.timeArrival(s,p)
+    if not s.continuousApproach or s.role~="WR" or not p or not p.reachable
+        or p.risk or p.diveAt or p.kind=="hold" or not s.grounded
+        or not finite(p.contactAt) or not finite(p.stopAt)
+        or not finite(p._aimDistance) or p._aimDistance<1.5 then return nil end
+    local touchAt=p.firstTouchAt or p.contactAt
+    if touchAt-p.stopAt<=0.12 then return nil end
+    local duration=touchAt-s.now-0.035-(p._reaction or 0)
+    if duration<=0.05 then return nil end
+    local originalTravel=travel(duration,p._speed,p._runSpeed or p._speed,p._sprintSeconds or INF)
+    if originalTravel<=0 then return nil end
+    local scale=p._aimDistance/originalTravel
+    if scale<0.45 or scale>=0.99 then return nil end
+    local paced={};for key,value in pairs(p) do paced[key]=value end
+    paced._speed=p._speed*scale
+    paced._runSpeed=(p._runSpeed or p._speed)*scale
+    paced.stopAt=touchAt-0.035
+    paced.movementScale, paced.timedArrival=scale,true
+    if not contact(s,paced,p.contactAt-s.now) then return nil end
+    local touch=Planner.firstTouch(s,paced)
+    if not inBounds(s,touch.root) or touch.at>touchAt+0.015
+        or p.effectiveProgress and touch.progress<p.effectiveProgress-0.5
+        or p.scoringCatch and finite(s.preferGoalZ) and touch.root.Z<s.preferGoalZ
+        or p.safety=="clear" and finite(p.defenderAt)
+            and paced.contactAt+(s.contestBuffer or 0.08)>=p.defenderAt then return nil end
+    paced.firstTouchAt,paced.firstTouchRoot,paced.firstTouchPosition=touch.at,touch.root,touch.position
+    paced.effectiveProgress=touch.progress
+    return paced
 end
 
 -- A pursuit is explicitly NOT a reachable-interception claim. It keeps the

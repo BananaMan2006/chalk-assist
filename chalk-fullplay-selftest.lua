@@ -24,6 +24,7 @@ return function(Policy,create,routeSource,policySource)
         CornerMinAngle=45,CornerMaxAngle=135,CornerMaxPenalty=.25,
         FillSpeed=24,MinLaunch=.4,ReleaseHeight=6,CatchHeight=3.5,QBBackYards=7,
         HandUpOffset=3.5,JumpHeight=6,CatchRadius=3.75,
+        Moves={Dive={Yards=3,Time=.35}},
         Pass={Bullet={Flight=1.05,Apex=6},Floater={Flight=3.1,Apex=42,Lead=4}},
         ReleaseDefs={LegalRelease={}}}
     local Field={MinX=-30,MaxX=30,MidX=0,BackZ=0,LOSZ=15,GoalZ=120,EndZ=150,YD=3,TurfY=0}
@@ -184,7 +185,9 @@ return function(Policy,create,routeSource,policySource)
         -- Native RouteMath captures dimensions at load; use a separate module.
         local r=assert(load(routeSource,"pressure fixture native RouteMath","t",e))()
         local p=input({LOS=f.LOSZ,position=Vector3.new(f.MidX,4.636868,f.LOSZ),
-            opponentPosition=Vector3.new(f.MidX,4.636868,19.825737)})
+            opponentPosition=Vector3.new(f.MidX,4.636868,19.825737),middleStemDeep=false})
+        -- The older numerical pressure/trial fixtures exercise the retained
+        -- fallback strategy. New middle-stem tests explicitly use the default.
         return f,r,p
     end
     local function assertLongPass(c,f,los)
@@ -198,6 +201,173 @@ return function(Policy,create,routeSource,policySource)
             assert(c.depth>=math.min(16,available)-1e-5,"unnecessarily short Floater selected")
         end
     end
+    local function defaultMiddleFixture()
+        local f,r,p=pressureFixture();p.middleStemDeep=nil
+        return f,r,p
+    end
+    test("default offense runs a real middle stem before a timed deep end-zone cut",function()
+        local f,r,p=defaultMiddleFixture();local c=assert(Policy.chooseRoute(p,Config,f,r))
+        assert(c.middleStemDeep and c.payload.Pass=="Floater" and c.routeStrategy=="middle-stem-deep")
+        local points=c.payload.Points;assert(#points==3 and c.cutCount==1)
+        near(c.payload.StartX,f.MidX);near(points[1].X,f.MidX);near(points[2].X,f.MidX)
+        assert(points[2].Y>points[1].Y+4*f.YD and points[3].Y>points[2].Y)
+        assert((points[3].X-f.MidX)*c.side>0 and math.abs(points[3].X-f.MidX)>=5*f.YD-1e-6)
+        assert(c.depth>=24 and c.depth<=28 and c.estimatedFinishZ>=f.GoalZ+f.YD)
+        local native=r.Plan(points,c.payload.Pass)
+        near(c.plan.Launch,native.Launch);near(c.lastCutAt,native.Times[2])
+        assert(native.Launch-native.Times[2]>=.2 and native.Launch-native.Times[2]<=.85)
+        assert(r.Length(points)<=Config.MaxInkYards*f.YD+1e-6)
+    end)
+    test("repeated middle-stem selections vary finish side and actual turn timing",function()
+        local f,r,p=defaultMiddleFixture();local history,sides,stems={},{},{}
+        for i=1,12 do
+            p.recentSelections=history;p.selectionIndex=i-1
+            local c=assert(Policy.chooseRoute(p,Config,f,r));assert(c.middleStemDeep and c.finishReachable)
+            sides[c.side]=true;stems[math.floor(c.stemYards*100+.5)]=true
+            history[#history+1]={pass=c.payload.Pass,shape=c.shape,depth=c.depth,side=c.side,
+                family=c.family,signature=c.signature,cutCount=c.cutCount,roundKey=tostring(i)}
+            while #history>6 do table.remove(history,1) end
+        end
+        local variants=0;for _ in pairs(stems) do variants=variants+1 end
+        assert(sides[-1] and sides[1],"middle offense kept attacking only one side")
+        assert(variants>1,"route variety never changed when the middle stem turned")
+    end)
+    test("deep finish budget keeps upright catches when sufficient and bounds the native dive alternative",function()
+        local oldFill=Config.FillSpeed
+        local ok,reason=pcall(function()
+            for _,fill in ipairs({16,24}) do
+                Config.FillSpeed=fill
+                local f,r,p=defaultMiddleFixture();local seen=false
+                for _,stamina in ipairs({0,15,30,50,75,100}) do
+                    p.stamina=stamina
+                    local c=assert(Policy.chooseRoute(p,Config,f,r))
+                    if c.middleStemDeep then
+                        seen=true
+                        local launch,segment=r.PointAt(c.plan,c.plan.Launch)
+                        local prethrowDistance=(launch-c.plan.Points[segment]).Magnitude
+                        for i=2,segment do prethrowDistance=prethrowDistance+(c.plan.Points[i]-c.plan.Points[i-1]).Magnitude end
+                        local function capacity(time,availableStamina)
+                            local sprintTime=math.min(math.max(0,time),availableStamina/Config.SprintDrain)
+                            return sprintTime*Config.SprintSpeed+math.max(0,time-sprintTime)*Config.RunSpeed
+                        end
+                        assert(prethrowDistance<=capacity(c.plan.Launch,stamina)+1e-7,
+                            "finish budget assumed an unreachable native launch pose")
+                        local launchStamina=math.max(0,stamina-(fill>Config.RunSpeed and c.plan.Launch*Config.SprintDrain or 0))
+                        near(c.estimatedLaunchStamina,launchStamina)
+                        near(c.estimatedLaunchX,launch.X);near(c.estimatedLaunchZ,launch.Y)
+                        local origin=Vector2.new(f.MidX,p.LOS-Config.QBBackYards*f.YD)
+                        local ball=origin:Lerp(c.plan.Target,.98)
+                        local distance=(ball-launch).Magnitude
+                        near(c.finishDistance,distance);near(c.finishWindow,c.plan.Flight*.98)
+                        near(c.fullRouteDistance,r.Length(c.payload.Points)+(c.plan.Target-c.payload.Points[#c.payload.Points]).Magnitude)
+                        local budget=c.plan.Flight*.98-.12
+                        assert(c.finishTravelTime+.12<=c.finishWindow+1e-7)
+                        if distance<=capacity(budget,launchStamina)+1e-7 then
+                            assert(c.finishMode=="upright","a reachable upright finish was unnecessarily budgeted as a dive")
+                        else
+                            assert(c.finishMode=="jumpDive")
+                            assert(distance<=capacity(budget-Config.Moves.Dive.Time,launchStamina)+Config.Moves.Dive.Yards*f.YD+1e-7,
+                                "deep finish exceeded the native movement and dive budget")
+                        end
+                    end
+                end
+                assert(seen,"fixture never exercised the new finish budget at FillSpeed "..fill)
+            end
+        end)
+        Config.FillSpeed=oldFill;assert(ok,reason)
+    end)
+    test("middle strategy respects translated fields and falls back instead of forcing exhausted or short-field routes",function()
+        local f,r,p=defaultMiddleFixture();local a=assert(Policy.chooseRoute(p,Config,f,r))
+        local offset=Vector3.new(250,0,-350);p.offset=offset
+        p.position=p.position+offset;p.opponentPosition=p.opponentPosition+offset
+        local b=assert(Policy.chooseRoute(p,Config,f,r));assert(b.middleStemDeep and a.side==b.side)
+        for i,point in ipairs(a.payload.Points) do near(point.X,b.payload.Points[i].X);near(point.Y,b.payload.Points[i].Y) end
+        near(a.estimatedFinishZ,b.estimatedFinishZ)
+        p.stamina=0;assert(not assert(Policy.chooseRoute(p,Config,f,r)).middleStemDeep)
+        p.stamina=100;p.LOS=f.GoalZ-f.YD
+        p.position=Vector3.new(f.MidX,3,p.LOS)+offset
+        local short=assert(Policy.chooseRoute(p,Config,f,r));assert(not short.middleStemDeep)
+        for _,point in ipairs(short.payload.Points) do assert(point.Y<=f.EndZ-1 and point.Y>=p.LOS-3*f.YD) end
+    end)
+    test("middle-stem navigation immediately turns after reaching the cut and yields at the throw",function()
+        local f,r,p=defaultMiddleFixture();local c=assert(Policy.chooseRoute(p,Config,f,r))
+        local stem=c.plan.Points[2]
+        p.routePlan=c.plan;p.routeWaypoint=2;p.elapsed=c.lastCutAt;p.phase="Live"
+        p.position=Vector3.new(stem.X,3,stem.Y)
+        local d=assert(Policy.movement(p,Config,f,r))
+        assert(d.kind=="route" and d.routeWaypoint==3 and (d.target.X-p.position.X)*c.side>0)
+        assert((d.target-p.position).Magnitude>d.stopDistance,"WR stopped on the reached middle cut")
+        p.ballActive=true;assert(Policy.movement(p,Config,f,r)==nil)
+        p.ballActive=false;p.passStarted=true;assert(Policy.movement(p,Config,f,r)==nil)
+    end)
+    test("middle prethrow pacing follows native 16 and 24 timelines without cutting early or camping",function()
+        local oldFill=Config.FillSpeed
+        local ok,reason=pcall(function()
+            for _,fill in ipairs({16,24}) do
+                Config.FillSpeed=fill
+                local points={Vector2.new(0,15),Vector2.new(0,63),Vector2.new(18,105)}
+                local plan=RouteMath.Plan(points,"Floater")
+                local p=input({middleStemDeep=true,routePlan=plan,routeWaypoint=2,elapsed=0,
+                    position=Vector3.new(0,3,15)})
+                local first=assert(move(p))
+                assert(first.moveSpeed>fill*.95 and first.moveSpeed<=fill and first.sprint==(fill>Config.RunSpeed))
+                near(first.moveScale,first.moveSpeed/(first.sprint and Config.SprintSpeed or Config.RunSpeed))
+                near(first.routeDeadline,plan.Times[2])
+                local dt=.025
+                while p.elapsed<plan.Times[2] do
+                    local d=assert(move(p));local delta=(d.target-p.position)*Vector3.new(1,0,1)
+                    assert(d.routeWaypoint==2 and math.abs(delta.X)<1e-7 and delta.Z>0,
+                        "middle pacing took the cut early, stopped, or reversed")
+                    assert(d.moveSpeed>0 and d.moveSpeed<=Config.SprintSpeed)
+                    if p.elapsed<plan.Times[2]-.3 then
+                        assert(p.position.Z<points[2].Y-1.5,"runner camped at the cut before its deadline")
+                    end
+                    p.position=p.position+delta.Unit*math.min(delta.Magnitude,d.moveSpeed*dt)
+                    p.elapsed=p.elapsed+dt
+                end
+                local turning=assert(move(p))
+                assert(turning.routeWaypoint==3 and turning.target.X>p.position.X,
+                    "runner did not turn after physically reaching its timed cut")
+            end
+        end)
+        Config.FillSpeed=oldFill;assert(ok,reason)
+    end)
+    test("early two-to-four stud stem overrun never reverses or takes the cut before its deadline",function()
+        local plan=RouteMath.Plan({Vector2.new(0,15),Vector2.new(0,63),Vector2.new(18,105)},"Floater")
+        for _,ahead in ipairs({2,4}) do
+            local p=input({middleStemDeep=true,routePlan=plan,routeWaypoint=2,
+                elapsed=plan.Times[2]-.5,position=Vector3.new(0,3,63+ahead)})
+            for _=1,12 do
+                local d=assert(move(p));local delta=(d.target-p.position)*Vector3.new(1,0,1)
+                assert(d.routeWaypoint==2 and delta.Z>0 and math.abs(delta.X)<1e-7,
+                    "early overrun began backward/sideways oscillation")
+                assert(d.moveSpeed>0 and d.moveScale>0 and not d.sprint)
+                p.position=p.position+delta.Unit*d.moveSpeed*.025;p.elapsed=p.elapsed+.025
+            end
+            p.elapsed=plan.Times[2]
+            local turn=assert(move(p));assert(turn.routeWaypoint==3 and turn.target.X>p.position.X)
+        end
+    end)
+    test("late jammed middle runner catches up at native sprint and never skips an unreached cut",function()
+        local plan=RouteMath.Plan({Vector2.new(0,15),Vector2.new(0,63),Vector2.new(18,105)},"Floater")
+        local p=input({middleStemDeep=true,routePlan=plan,routeWaypoint=2,
+            elapsed=plan.Times[2]+.5,position=Vector3.new(0,3,15)})
+        local d=assert(move(p));assert(d.routeWaypoint==2 and d.sprint)
+        near(d.moveSpeed,Config.SprintSpeed);near(d.moveScale,1)
+        near(d.target.X,0);near(d.target.Z,63)
+        p.middleStemDeep=false;assert(move(p).moveSpeed==nil,"pacing changed an ordinary route")
+        p.middleStemDeep=true;p.ballActive=true;assert(move(p)==nil)
+        p.ballActive=false;p.passStarted=true;assert(move(p)==nil)
+    end)
+    test("middle route endpoint continues gently along the final leg until the real throw",function()
+        local plan=RouteMath.Plan({Vector2.new(0,15),Vector2.new(0,63),Vector2.new(18,105)},"Floater")
+        local p=input({middleStemDeep=true,routePlan=plan,routeWaypoint=3,
+            elapsed=plan.Times[3]-.2,position=Vector3.new(18,3,105)})
+        local d=assert(move(p))
+        assert(d.target.X>p.position.X and d.target.Z>p.position.Z and d.moveSpeed>0 and not d.sprint)
+        p.elapsed=plan.Times[3]+1;assert(move(p).moveSpeed>0)
+        inBounds(d.target)
+    end)
     local function assertPressureBound(c,f)
         local tolerance=c.goalClearanceToleranceUsed or 0
         local trialGap=c.experimentalClearanceGap or 0
@@ -553,6 +723,41 @@ return function(Policy,create,routeSource,policySource)
         p.elapsed=nil
         assert(move(p)==nil)
     end)
+    test("unlearned DB coverage returns to the shallower side without spending sprint",function()
+        for _,phase in ipairs({"PreSnap","Live"}) do
+            local p=input({role="DB",phase=phase,position=Vector3.new(0,3,42),
+                opponentPosition=Vector3.new(0,3,30),opponentVelocity=Vector3.zero,stamina=100})
+            local d=move(p)
+            assert(d and d.kind=="shadow" and not d.sprint)
+            assert(d.target.Z<p.opponentPosition.Z and d.target.Z>=p.opponentPosition.Z-1.5*Field.YD,
+                "default coverage restored an unwanted goal-side lead")
+            inBounds(d.target)
+        end
+    end)
+    test("observed deep-pass bias moves DB coverage deeper with a bounded field-relative shift",function()
+        local targets={}
+        for i,bias in ipairs({0,1.25,2.5,20}) do
+            local p=input({role="DB",phase="PreSnap",position=Vector3.new(0,3,45),
+                opponentPosition=Vector3.new(0,3,30),defenseProfile={depthBiasYards=bias}})
+            local d=move(p);targets[i]=d.target.Z
+            assert(not d.sprint);inBounds(d.target)
+            local offset=Vector3.new(100,0,-70)
+            p.offset=offset;p.position=p.position+offset;p.opponentPosition=p.opponentPosition+offset
+            local shifted=move(p)
+            near(shifted.target.Z,d.target.Z+offset.Z);near(shifted.target.X,d.target.X+offset.X)
+        end
+        assert(targets[1]<30 and targets[2]>targets[1] and targets[3]>targets[2])
+        assert(targets[3]>30 and targets[3]<=30+3*Field.YD)
+        near(targets[4],targets[3])
+    end)
+    test("defensive depth learning never takes control of ball flight or confirmed carrier pursuit",function()
+        local p=input({role="DB",phase="Live",position=Vector3.new(0,3,25),
+            opponentPosition=Vector3.new(0,3,30),defenseProfile={depthBiasYards=2.5}})
+        p.ballActive=true;assert(move(p)==nil)
+        p.ballActive=false;p.passStarted=true;assert(move(p)==nil)
+        p.phase="RAC";p.enemyCarrier=true
+        assert(move(p).kind=="pursue" and move(p).sprint)
+    end)
     test("DB shadow permits a brief trail and variable lead without a fixed spacing leash",function()
         for _,phase in ipairs({"PreSnap","Live"}) do
             for _,z in ipairs({24,26,27,28.5,30,32,42,43.5,45,70}) do
@@ -561,10 +766,10 @@ return function(Policy,create,routeSource,policySource)
                 local d=move(p)
                 assert(d and d.kind=="shadow")
                 local gap=d.target.Z-p.opponentPosition.Z
-                assert(gap>=-Field.YD-1e-6 and gap<=5*Field.YD+1e-6,
+                assert(gap>=-1.5*Field.YD-1e-6 and gap<=.5*Field.YD+1e-6,
                     "DB left the flexible coverage band in "..phase)
-                if z>=27 and z<=45 then near(d.target.Z,z)
-                elseif z<27 then near(d.target.Z,30) end
+                if z>=25.5 and z<=31.5 then near(d.target.Z,z)
+                else near(d.target.Z,30-.75*Field.YD) end
                 assert(not d.sprint,"stationary or pre-snap coverage burned sprint")
                 inBounds(d.target)
             end
@@ -575,7 +780,7 @@ return function(Policy,create,routeSource,policySource)
             position=Vector3.new(18.89393,4.63687,19.82446),
             opponentPosition=Vector3.new(18.89391,4.63679,-20.95496)})
         local d=move(p)
-        near(d.target.Z,p.opponentPosition.Z+5*Field.YD)
+        near(d.target.Z,p.opponentPosition.Z-.75*Field.YD)
         assert(d.target.Z<p.position.Z and not d.sprint,"deep native gap should close at normal speed")
         p=input({role="DB",phase="Live",position=Vector3.new(0,3,43),
             opponentPosition=Vector3.new(6,3,30),opponentVelocity=Vector3.new(27,0,0)})
@@ -584,7 +789,7 @@ return function(Policy,create,routeSource,policySource)
         p.priorTarget=right.target
         local left=move(p)
         assert(right.target.X>0 and left.target.X<0,"coverage retained the old lateral direction")
-        near(right.target.Z,43);near(left.target.Z,43)
+        near(right.target.Z,30-.75*Field.YD);near(left.target.Z,30-.75*Field.YD)
         p.opponentPosition=Vector3.new(24,3,20);p.opponentVelocity=Vector3.new(0,0,-20)
         assert(not move(p).sprint,"retreating WR drained sprint while DB closed excessive depth")
     end)
@@ -597,8 +802,9 @@ return function(Policy,create,routeSource,policySource)
                         stamina=100,sprintOn=activeSprint})
                     local d=move(p)
                     assert(d and not d.sprint,"routine "..gap.."yd coverage sprinted at WR speed "..speed)
-                    if gap<1 then near(d.target.Z,math.max(p.position.Z,30+speed*.25))
-                    else near(d.target.Z,p.position.Z) end
+                    local expected=(gap< -1.5 or gap>.5) and 30-.75*Field.YD or p.position.Z
+                    if gap<0 then expected=math.max(expected,30-.75*Field.YD+speed*.25) end
+                    near(d.target.Z,expected)
                     inBounds(d.target)
                 end
             end
@@ -610,7 +816,7 @@ return function(Policy,create,routeSource,policySource)
                 opponentPosition=Vector3.new(0,3,30),opponentVelocity=Vector3.new(0,0,27),
                 stamina=100,sprintOn=true})
             local d=move(p)
-            near(d.target.Z,p.opponentPosition.Z+27*.25)
+            near(d.target.Z,p.opponentPosition.Z-.75*Field.YD+27*.25)
             assert(not d.sprint,"a modest trail spent sprint merely to restore spacing")
         end
     end)
@@ -632,22 +838,22 @@ return function(Policy,create,routeSource,policySource)
         assert(gap>=-.25*Field.YD and gap<=Field.YD,
             "walk-follow retained the full trailing allowance or imposed a large lead")
     end)
-    test("DB downfield recovery uses normal reserve and releases after regaining half a yard",function()
-        local p=input({role="DB",phase="Live",position=Vector3.new(0,3,89),
+    test("DB downfield recovery uses normal reserve and releases at its shallow preferred depth",function()
+        local p=input({role="DB",phase="Live",position=Vector3.new(0,3,85),
             opponentPosition=Vector3.new(0,3,90),opponentVelocity=Vector3.new(0,0,20)})
         for _,case in ipairs({{74,false,false},{75,false,true},{61,true,true},{60,true,false}}) do
             p.stamina=case[1];p.sprintOn=case[2]
             assert(move(p).sprint==case[3],"downfield recovery bypassed normal stamina reserve")
         end
-        p.stamina=100;p.position=Vector3.new(0,3,90);p.sprintOn=false
-        assert(not move(p).sprint,"level DB began an unnecessary recovery burst")
+        p.stamina=100;p.position=Vector3.new(0,3,86.5);p.sprintOn=false
+        assert(not move(p).sprint,"DB inside its recovery start band began another burst")
         p.sprintOn=true
-        assert(move(p).sprint,"active recovery stopped at level without its small hysteresis band")
-        p.position=Vector3.new(0,3,91.5)
+        assert(move(p).sprint,"active recovery stopped before regaining its preferred shallow depth")
+        p.position=Vector3.new(0,3,87.75)
         assert(not move(p).sprint,"downfield recovery kept sprinting beyond its release threshold")
-        p.position=Vector3.new(0,3,83);p.opponentPosition=Vector3.new(0,3,84);p.sprintOn=false
+        p.position=Vector3.new(0,3,79);p.opponentPosition=Vector3.new(0,3,84);p.sprintOn=false
         assert(move(p).sprint,"recovery missed the last-twelve-yard boundary")
-        p.position=Vector3.new(0,3,82.9);p.opponentPosition=Vector3.new(0,3,83.9)
+        p.position=Vector3.new(0,3,78.9);p.opponentPosition=Vector3.new(0,3,83.9)
         assert(not move(p).sprint,"late-field recovery leaked into the early loose band")
     end)
     test("DB walk-follow and downfield recovery ignore retreating feints and yield to the throw",function()
@@ -737,7 +943,8 @@ return function(Policy,create,routeSource,policySource)
             local d=move(p)
             inBounds(d.target)
             near(d.target.X,side*(Field.MaxX-Field.YD*.75))
-            near(d.target.Z,p.position.Z)
+            assert(d.target.Z<=p.position.Z and d.target.Z>=p.opponentPosition.Z-.5*Field.YD,
+                "retreat either deepened coverage or abandoned the near-goal shallow bound")
             assert(not d.sprint,"retreating lateral crossing bypassed sprint conservation")
         end
     end)
@@ -779,17 +986,17 @@ return function(Policy,create,routeSource,policySource)
         assert(move(p).kind=="pursue" and move(p).sprint,
             "prethrow reserve restriction leaked into confirmed carrier pursuit")
     end)
-    test("DB protects the last six yards to goal with a smaller goal-side guard",function()
+    test("DB narrows its near-goal trailing allowance without restoring a permanent lead",function()
         for _,offset in ipairs({Vector3.zero,Vector3.new(0,0,-40)}) do
-            for _,z in ipairs({108,110,111,113,117,119}) do
+            for _,z in ipairs({105,108,110,111,113,117,119}) do
                 local p=input({role="DB",phase="Live",offset=offset,
                     position=Vector3.new(0,3,z)+offset,
                     opponentPosition=Vector3.new(0,3,110)+offset,
                     opponentVelocity=Vector3.new(0,0,12),stamina=50})
                 local d=move(p)
                 local gap=d.target.Z-p.opponentPosition.Z
-                assert(gap>=Field.YD and gap<=3*Field.YD,"goal-line guard lost safe bounds")
-                if z<113 then assert(d.sprint,"imminent goal-line bypass failed to use reserved sprint")
+                assert(gap>=-.5*Field.YD and gap<=.5*Field.YD,"goal-line guard lost its shallow bounds")
+                if z<107 then assert(d.sprint,"imminent goal-line bypass failed to use reserved sprint")
                 else assert(not d.sprint,"comfortable goal-line guard wasted sprint") end
                 inBounds(d.target,offset)
                 p.phase="PreSnap";assert(not move(p).sprint,"goal-line urgency bypassed pre-snap walking")
@@ -815,20 +1022,20 @@ return function(Policy,create,routeSource,policySource)
         end
     end)
     test("retreat guard preserves advancing urgency normal coverage and phase priority",function()
-        local p=input({role="DB",phase="Live",position=Vector3.new(0,3,111),
+        local p=input({role="DB",phase="Live",position=Vector3.new(0,3,105),
             opponentPosition=Vector3.new(0,3,110),stamina=50})
         p.opponentVelocity=Vector3.new(0,0,-2.001)
-        near(move(p).target.Z,111);assert(not move(p).sprint)
+        near(move(p).target.Z,105);assert(not move(p).sprint)
         p.opponentVelocity=Vector3.new(0,0,-2)
-        near(move(p).target.Z,113)
+        near(move(p).target.Z,108.5)
         p.opponentVelocity=Vector3.new(0,0,12)
-        near(move(p).target.Z,113);assert(move(p).sprint,"advancing goal threat lost reserve protection")
+        near(move(p).target.Z,111.5);assert(move(p).sprint,"advancing goal threat lost reserve protection")
         p.opponentVelocity=Vector3.new(0,0,-12);p.phase="PreSnap"
-        near(move(p).target.Z,113);assert(not move(p).sprint)
+        near(move(p).target.Z,108.5);assert(not move(p).sprint)
         p.phase="Live";p.position=Vector3.new(0,3,145)
-        near(move(p).target.Z,119);assert(not move(p).sprint,"closing excess depth spent sprint")
+        near(move(p).target.Z,108.5);assert(not move(p).sprint,"closing excess depth spent sprint")
         p.position=Vector3.new(0,3,25);p.opponentPosition=Vector3.new(0,3,30)
-        near(move(p).target.Z,30)
+        near(move(p).target.Z,27.75)
         p.ballActive=true;assert(move(p)==nil)
         p.ballActive=false;p.passStarted=true;assert(move(p)==nil)
     end)
@@ -948,6 +1155,143 @@ return function(Policy,create,routeSource,policySource)
         function h:navigate() return self.api.navigate(self.snapshot,self.root,self.humanoid,self.time,.05) end
         h:load();return h
     end
+    local function observedDefenseThrow(h,options)
+        options=options or {};h.time=h.time+1
+        local s=h.snapshot
+        s.role=options.role or "DB";s.mode=options.mode or "1v1"
+        if options.nativeMode then s.mode=nil end
+        s.testing=options.testing==true;s.phase="PreSnap";s.preSnapEnds=h.time+15
+        s.carrier=nil;s.enemyCarrier=false;s.arc=nil;s.launchAt=nil
+        h.api.onMatch({Phase="PreSnap"})
+        local offset=options.offset or Vector3.zero;s.offset=offset
+        h.root.Position=Vector3.new(0,3,30+(options.depthAtThrow or 0)*Field.YD)+offset
+        h.opponentRoot.Position=Vector3.new(0,3,30)+offset
+        s.phase="Live";s.passType=options.pass or "Floater"
+        local data={Type="Throw",Pass=s.passType,LaunchAt=h.time,
+            Arc={P0=Vector3.new(0,6,Field.LOSZ-7*Field.YD)+offset,
+                P1=Vector3.new(0,3.5,options.targetZ or Field.GoalZ)+offset,Flight=3.1,Apex=42}}
+        if options.noArc then data.Arc=nil end
+        h.api.onFx(data)
+        return data
+    end
+    test("DB profile learns only confirmed shallow deep-Floater losses and deduplicates terminal evidence",function()
+        local h=harness({accountId=123});h.api.setEnabled(true)
+        local thrown=observedDefenseThrow(h,{nativeMode=true,offset=Vector3.new(100,0,-40)})
+        assert(h.api.status().activeDefense and h.api.status().defenseProfile.samples==0)
+        h.api.onFx({Type="BallResult",Result="Catch"})
+        assert(h.api.status().defenseProfile.samples==0,"missing catcher was treated as confirmed enemy possession")
+        h.api.onFx({Type="BallResult",Result="Catch",Catcher=h.opponent})
+        local s=h.api.status();near(s.defenseProfile.depthBiasYards,1.25)
+        assert(s.defenseProfile.samples==1 and s.defenseProfile.deepFloaterLosses==1)
+        h.api.onFx(thrown);h.api.onFx({Type="BallResult",Result="Catch",Catcher=h.opponent})
+        h.api.onMatch({Phase="Result",Result="Touchdown",Point="Opp"})
+        assert(h.api.status().defenseProfile.samples==1,"duplicate throw/catch/TD counted twice")
+        observedDefenseThrow(h,{depthAtThrow=.5})
+        h.api.onMatch({Phase="Result",Result="Touchdown",Point="Them"})
+        s=h.api.status();near(s.defenseProfile.depthBiasYards,2.5);assert(s.defenseProfile.samples==2)
+        observedDefenseThrow(h);h.api.onFx({Type="BallResult",Result="Catch",Catcher=h.opponent})
+        near(h.api.status().defenseProfile.depthBiasYards,2.5)
+    end)
+    test("incomplete is neutral while confirmed deep stops and short-Bullet losses adjust the profile",function()
+        local h=harness();h.api.setEnabled(true)
+        observedDefenseThrow(h);h.api.onFx({Type="BallResult",Result="Catch",Catcher=h.opponent})
+        observedDefenseThrow(h);h.api.onFx({Type="BallResult",Result="Incomplete"})
+        near(h.api.status().defenseProfile.depthBiasYards,1.25)
+        observedDefenseThrow(h);h.api.onFx({Type="BallResult",Result="Swatted"})
+        near(h.api.status().defenseProfile.depthBiasYards,1)
+        observedDefenseThrow(h,{pass="Bullet",targetZ=Field.LOSZ+5*Field.YD})
+        h.api.onFx({Type="BallResult",Result="Catch",Catcher=h.opponent})
+        near(h.api.status().defenseProfile.depthBiasYards,.5)
+        local alreadyDeep=harness();alreadyDeep.api.setEnabled(true)
+        observedDefenseThrow(alreadyDeep,{depthAtThrow=.51})
+        alreadyDeep.api.onFx({Type="BallResult",Result="Catch",Catcher=alreadyDeep.opponent})
+        near(alreadyDeep.api.status().defenseProfile.depthBiasYards,0)
+    end)
+    test("defense learning rejects missing arcs WR Team testing and outcomes from a later round",function()
+        for _,options in ipairs({{noArc=true},{role="WR"},{mode="Team"},{testing=true}}) do
+            local h=harness();h.api.setEnabled(true);observedDefenseThrow(h,options)
+            h.api.onFx({Type="BallResult",Result="Catch",Catcher=h.opponent})
+            assert(h.api.status().defenseProfile.samples==0)
+        end
+        local h=harness();observedDefenseThrow(h)
+        h.api.onFx({Type="BallResult",Result="Catch",Catcher=h.opponent})
+        assert(h.api.status().defenseProfile.samples==0,"disabled full auto captured defensive learning")
+        h.api.setEnabled(true);observedDefenseThrow(h)
+        h.snapshot.phase="PreSnap";h.snapshot.preSnapEnds=h.snapshot.preSnapEnds+20
+        h.api.onMatch({Phase="PreSnap"});h.api.onFx({Type="BallResult",Result="Catch",Catcher=h.opponent})
+        assert(h.api.status().defenseProfile.samples==0,"new round inherited the old pending throw")
+    end)
+    test("defense history is bounded and restores only fresh matching-opponent evidence across servers",function()
+        local h=harness({time=100,accountId=123});h.api.setEnabled(true)
+        observedDefenseThrow(h);h.api.onFx({Type="BallResult",Result="Catch",Catcher=h.opponent})
+        local saved=h.memoryDisk
+        local nextGame=harness({time=200,accountId=123,jobId="job-b",memoryDisk=saved})
+        near(nextGame.api.status().defenseProfile.depthBiasYards,1.25)
+        assert(nextGame.api.status().activeDefense==nil,"disk restored an active throw")
+        local expired=harness({time=saved.savedAt+1801,accountId=123,memoryDisk=saved})
+        assert(expired.api.status().defenseProfile.samples==0)
+        nextGame.accountId=456;assert(nextGame.api.status().defenseProfile.samples==0)
+        for _=1,8 do observedDefenseThrow(h);h.api.onFx({Type="BallResult",Result="Incomplete"}) end
+        assert(#h.api.status().routeMemory.recentDefense==6 and #h.memoryDisk.recentDefense==6)
+    end)
+    test("learned DB profile reaches navigation rather than remaining only stored diagnostics",function()
+        local h=harness();h.api.setEnabled(true)
+        h.snapshot.role="DB";h.snapshot.phase="PreSnap"
+        h.root.Position=Vector3.new(0,3,30);h.opponentRoot.Position=Vector3.new(0,3,30)
+        observedDefenseThrow(h);h.api.onFx({Type="BallResult",Result="Catch",Catcher=h.opponent})
+        observedDefenseThrow(h);h.api.onFx({Type="BallResult",Result="Catch",Catcher=h.opponent})
+        h.snapshot.phase="PreSnap";h.snapshot.passStarted=false;h.snapshot.arc=nil
+        h.root.Position=Vector3.new(0,3,30);h.opponentRoot.Position=Vector3.new(0,3,30)
+        local d=assert(h:navigate())
+        assert(d.direction.Z>0 and not d.sprint,"observed repeated deep catches did not deepen the walking target")
+    end)
+    test("deep-catch intent is pure and available only after an enabled successful route submission",function()
+        local original=Policy.chooseRoute
+        Policy.chooseRoute=function(...)
+            local c=assert(original(...));c.middleStemDeep=true;return c
+        end
+        local ok,reason=pcall(function()
+            local h=harness();assert(h.api.catchIntent()==nil)
+            h.api.setEnabled(true);assert(h.api.catchIntent()==nil);h:settle()
+            local intent=assert(h.api.catchIntent())
+            assert(intent.deepFinish and typeof(intent.waypoint)=="Vector2")
+            near(intent.goalZ,Field.GoalZ);near(intent.endZ,Field.EndZ)
+            h.ctx.snapshot=function() error("intent must not recurse into core context") end
+            assert(h.api.catchIntent().deepFinish)
+            h.api.setEnabled(false);assert(h.api.catchIntent()==nil)
+            h.api.unload();assert(h.api.catchIntent()==nil)
+        end)
+        Policy.chooseRoute=original
+        assert(ok,reason)
+    end)
+    test("controller forwards middle pacing and scales input against actual native walk speed",function()
+        local original,oldFill=Policy.chooseRoute,Config.FillSpeed
+        Config.FillSpeed=16
+        local points={Vector2.new(0,15),Vector2.new(0,63),Vector2.new(18,105)}
+        local plan=RouteMath.Plan(points,"Floater")
+        Config.FillSpeed=oldFill
+        Policy.chooseRoute=function(...)
+            local c=assert(original(...))
+            c.middleStemDeep=true;c.payload={Points=points,StartX=0,Pass="Floater"};c.plan=plan
+            return c
+        end
+        local ok,reason=pcall(function()
+            local h=harness();h.api.setEnabled(true);h:settle()
+            h.snapshot.phase="Live";h.snapshot.snapAt=h.time;h.snapshot.route=nil
+            h.root.Position=Vector3.new(0,3,15)
+            local expectedSpeed=48/(plan.Times[2]+.05)
+            for _,actualSpeed in ipairs({27,20,12}) do
+                h.humanoid.WalkSpeed=actualSpeed
+                local d=assert(h:navigate())
+                assert(not d.sprint and d.direction.Z>0 and math.abs(d.direction.X)<1e-7)
+                near(d.direction.Magnitude*actualSpeed,math.min(actualSpeed,expectedSpeed))
+                assert(d.direction.Magnitude<=1,"pacing attempted to exceed native movement speed")
+            end
+            h.snapshot.arc={};assert(h:navigate()==nil)
+        end)
+        Policy.chooseRoute=original;Config.FillSpeed=oldFill
+        assert(ok,reason)
+    end)
     test("controller off by default and one submission per pre-snap",function()
         local h=harness();h:tick();assert(#h.submits==0)
         h.api.setEnabled(true);h:settle();assert(#h.submits==1 and h.closes==1)

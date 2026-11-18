@@ -110,7 +110,7 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
         fields = fields or {}
         if fields.defenderAt==math.huge or fields.defenderAt==-math.huge then fields.defenderAt=nil end
         fields.kind, fields.time = kind, workspace:GetServerTimeNow()
-        fields.version="2.40"
+        fields.version="2.41"
         fields.launchAt=fields.launchAt or throwKey
         table.insert(history, fields)
         if #history > 80 then table.remove(history, 1) end
@@ -244,6 +244,9 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
             end
         end
         return {now=now, arc=s.arc, launchAt=s.launchAt,role=s.role,
+            continuousApproach=s.role=="WR" and s.catchIntent and s.catchIntent.deepFinish==true,
+            preferGoalZ=s.role=="WR" and s.catchIntent and s.catchIntent.deepFinish
+                and s.catchIntent.goalZ+(s.offset and s.offset.Z or 0) or nil,
             defenderDeadline=s.role=="WR" and wrDefenderDeadline or nil,
             opponent=opponentSnapshot,opponents=opponentSnapshots,bounds=bounds,
             position=root.Position, velocity=root.AssemblyLinearVelocity,
@@ -678,8 +681,17 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
         end
         if wrFake and updateWRFake(s,root,h,now,dt) then return end
         if not plan then return end
+        if not plan.timedArrival and lastSnapshot and lastSnapshot.continuousApproach then
+            local paced=Planner.timeArrival(lastSnapshot,plan)
+            if paced then
+                plan=paced
+                atTarget,parkedPosition=false,nil
+                log("wrTimedArrival",{contactAt=plan.contactAt,stopAt=plan.stopAt,
+                    movementScale=plan.movementScale,position=xyz(root.Position)})
+            end
+        end
         if not atTarget and plan.reachable~=false and not plan.diveAt and not jumped
-            and motion.grounded and reachAirborne~=false then
+            and not plan.timedArrival and motion.grounded and reachAirborne~=false then
             local distance=((plan.approachTarget-root.Position)*Vector3.new(1,0,1)).Magnitude
             if distance<3 or now>=plan.stopAt then
                 local stationary,still=stationaryPlan(s,root,h,now)
@@ -717,6 +729,7 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
                 -- Airborne momentum must never replace it with a parked plan.
                 atTarget,parkedPosition=false,nil
             elseif delta.Magnitude<0.65 and not atTarget and not jumped
+                and (not plan.timedArrival or now>=plan.stopAt)
                 and motion.grounded and reachAirborne~=false then
                 atTarget,parkedPosition=true,root.Position
             elseif delta.Magnitude>2.5 then atTarget,parkedPosition=false,nil end
@@ -728,9 +741,9 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
                 log("sprint",{position=xyz(root.Position),stamina=me:GetAttribute("Stamina")})
             end
             if moving then
-                local desired=plan.diveAt and delta:Dot(plan.direction)<=0 and plan.direction
+                local desired=(plan.diveAt or plan.timedArrival) and delta:Dot(plan.direction)<=0 and plan.direction
                     or (delta.Magnitude>0.1 and delta.Unit or plan.direction)
-                h:Move(smoothDirection(desired,root,h,dt),false)
+                h:Move(smoothDirection(desired,root,h,dt)*(plan.movementScale or 1),false)
             else
                 h:Move(Vector3.zero,false)
                 releaseSprint()
@@ -770,7 +783,8 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
                 uprightSnapshot.canDive=false
                 uprightSnapshot.allowLastResort=plan.risk~=nil
                 local upright=solveActual(uprightSnapshot)
-                if upright then
+                if upright and not (plan.scoringCatch and plan.safety~="contested"
+                    and upright.scoringCatch~=true) then
                     log("diveAvoided",{role=s.role,reason="Upright catch now reachable",
                         action=upright.kind,contactAt=upright.contactAt,position=xyz(root.Position)})
                     plan,lastSnapshot=nil,nil
@@ -1010,6 +1024,6 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
         touchedConnection:Disconnect()
         cancel()
     end
-    log("loaded",{version="2.40",nativeDive=nativeDive~=nil,nativeGrab=nativeGrabTarget~=nil})
+    log("loaded",{version="2.41",nativeDive=nativeDive~=nil,nativeGrab=nativeGrabTarget~=nil})
     return controller
 end

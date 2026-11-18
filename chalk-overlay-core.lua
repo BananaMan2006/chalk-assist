@@ -145,7 +145,7 @@ local function auditMatch(kind,data)
             end
         end
         appendfile("ciu_match_audit.jsonl",game:GetService("HttpService"):JSONEncode({
-            kind=kind,version="2.40",time=workspace:GetServerTimeNow(),jobId=game.JobId,
+            kind=kind,version="2.41",time=workspace:GetServerTimeNow(),jobId=game.JobId,
             selectedQueue=state and state.selectedMode,phase=phase,role=role,
             fullAuto=fullAutoState,
             fields=fields,rankAttributes=observedRank()})..string.char(10))
@@ -303,7 +303,7 @@ matchSkipLabel.Name="MatchSkipLabel"
 matchSkipLabel.Position=UDim2.fromOffset(12,344)
 matchSkipLabel.Size=UDim2.fromOffset(366,20)
 matchSkipLabel.BackgroundTransparency=1
-matchSkipLabel.Text="Leave matches against this username"
+matchSkipLabel.Text="Auto-leave usernames (separate with commas)"
 matchSkipLabel.TextColor3=white
 matchSkipLabel.Font=Enum.Font.GothamMedium
 matchSkipLabel.TextSize=12
@@ -316,7 +316,7 @@ matchSkipBox.Size=UDim2.fromOffset(230,28)
 matchSkipBox.BackgroundColor3=Color3.fromRGB(29,40,55)
 matchSkipBox.TextColor3=white
 matchSkipBox.PlaceholderColor3=Color3.fromRGB(139,154,175)
-matchSkipBox.PlaceholderText="@username"
+matchSkipBox.PlaceholderText="@name1, @name2, @name3"
 matchSkipBox.Text=""
 matchSkipBox.ClearTextOnFocus=false
 matchSkipBox.MultiLine=false
@@ -461,15 +461,19 @@ local function updateMatchSkipUI()
     matchSkipButton.BackgroundColor3=state.enabled and Color3.fromRGB(32,93,67)
         or Color3.fromRGB(39,54,70)
     if not matchSkipEditing and not matchSkipBox:IsFocused() then
-        local value=state.username~="" and "@"..state.username or ""
+        local displayNames={}
+        for _,name in ipairs(state.usernames or {}) do
+            displayNames[#displayNames+1]="@"..name
+        end
+        local value=table.concat(displayNames,", ")
         if matchSkipBox.Text~=value then matchSkipBox.Text=value end
     end
     matchSkipHint.Text=matchSkipInputError or state.saveError or state.message
         or "Leaves and rejoins; may count as a forfeit."
 end
-function api.setMatchSkipUsername(value)
+function api.setMatchSkipUsernames(value)
     if not matchSkip then return false,"Auto leave is starting" end
-    local ok,reason=matchSkip.setUsername(value)
+    local ok,reason=matchSkip.setUsernames(value)
     if ok then
         matchSkipEditing=false;matchSkipInputError=nil
         matchSkip.setEditing(false)
@@ -477,6 +481,7 @@ function api.setMatchSkipUsername(value)
     updateMatchSkipUI()
     return ok,reason
 end
+api.setMatchSkipUsername=api.setMatchSkipUsernames
 function api.setMatchSkip(value)
     if not matchSkip then return false,"Auto leave is starting" end
     local ok,reason=matchSkip.setEnabled(value)
@@ -972,7 +977,7 @@ end
 function api.status()
     local ch = characterOf(opponent)
     local holder,isEnemy,holderRole=carrierContext()
-    return {version="2.40", enabled=enabled, role=role or "unknown",rawRole=rawRole or "unknown", phase=phase,
+    return {version="2.41", enabled=enabled, role=role or "unknown",rawRole=rawRole or "unknown", phase=phase,
         ui={visible=windowVisible,minimized=minimized,x=panel.Position.X.Offset,y=panel.Position.Y.Offset},
         matchAlerts={enabled=alertSettings.enabled,saveError=alertSettings.saveError},
         idleGuard=idleGuard and idleGuard.status() or nil,
@@ -992,6 +997,7 @@ function api.context()
     local holder,isEnemy,holderRole=carrierContext()
     return {role=role,phase=phase,mode=mode,modeSource=modeSource,arc=arc,launchAt=launchAt,
         route=route,snapAt=snapAt,passType=passType,preSnapEnds=preSnapEnds,
+        catchIntent=fullplay and fullplay.catchIntent and fullplay.catchIntent() or nil,
         passStarted=passStarted,
         enabled=enabled,testing=testing,alive=alive,offset=offset,
         matchIdentityVerified=matchIdentityVerified,
@@ -1268,4 +1274,4 @@ if type(writefile)=="function" then
         end
     end)
 end
-print("Chalk Assist 2.40 loaded. Full Auto preserves defensive stamina and varies legal routes. Idle protection runs automatically. Drag / minimize / Right Shift hide. V assist / B all / F8 unload.")
+print("Chalk Assist 2.41 loaded. Full Auto preserves defensive stamina and varies legal routes. Idle protection runs automatically. Drag / minimize / Right Shift hide. V assist / B all / F8 unload.")
