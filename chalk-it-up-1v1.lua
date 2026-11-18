@@ -146,7 +146,7 @@ local function auditMatch(kind,data)
             end
         end
         appendfile("ciu_match_audit.jsonl",game:GetService("HttpService"):JSONEncode({
-            kind=kind,version="2.44",time=workspace:GetServerTimeNow(),jobId=game.JobId,
+            kind=kind,version="2.45",time=workspace:GetServerTimeNow(),jobId=game.JobId,
             selectedQueue=state and state.selectedMode,phase=phase,role=role,
             fullAuto=fullAutoState,
             fields=fields,rankAttributes=observedRank()})..string.char(10))
@@ -979,7 +979,7 @@ end
 function api.status()
     local ch = characterOf(opponent)
     local holder,isEnemy,holderRole=carrierContext()
-    return {version="2.44", enabled=enabled, role=role or "unknown",rawRole=rawRole or "unknown", phase=phase,
+    return {version="2.45", enabled=enabled, role=role or "unknown",rawRole=rawRole or "unknown", phase=phase,
         ui={visible=windowVisible,minimized=minimized,x=panel.Position.X.Offset,y=panel.Position.Y.Offset},
         matchAlerts={enabled=alertSettings.enabled,saveError=alertSettings.saveError},
         idleGuard=idleGuard and idleGuard.status() or nil,
@@ -3315,7 +3315,7 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
         fields = fields or {}
         if fields.defenderAt==math.huge or fields.defenderAt==-math.huge then fields.defenderAt=nil end
         fields.kind, fields.time = kind, workspace:GetServerTimeNow()
-        fields.version="2.44"
+        fields.version="2.45"
         fields.launchAt=fields.launchAt or throwKey
         table.insert(history, fields)
         if #history > 80 then table.remove(history, 1) end
@@ -4319,7 +4319,7 @@ return function(ctx, Planner, createTackle, WRApproach, Motion, createCarrierMov
         touchedConnection:Disconnect()
         cancel()
     end
-    log("loaded",{version="2.44",nativeDive=nativeDive~=nil,nativeGrab=nativeGrabTarget~=nil})
+    log("loaded",{version="2.45",nativeDive=nativeDive~=nil,nativeGrab=nativeGrabTarget~=nil})
     return controller
 end
 
@@ -5770,7 +5770,12 @@ function Policy.movement(input,Config,Field,RouteMath)
             and #plan.Points>=3 and type(plan.Times)=="table" then
             local index=clamp(finite(input.routeWaypoint) and math.floor(input.routeWaypoint) or 2,2,#plan.Points)
             local slowStem=input.slowStem==true and finite(input.slowStemTime)
-            local finalSprint=slowStem and input.finalSprintCommitted==true
+            -- The native throw clock keeps running through a jam or detour.
+            -- At the selected cut time, take the final diagonal from here;
+            -- walking to a missed stem waypoint spends the catch window.
+            -- This starts no earlier than the route's budgeted sprint time.
+            local finalSprint=slowStem and (input.finalSprintCommitted==true
+                or input.elapsed>=input.slowStemTime)
             if finalSprint then index=math.max(3,index) end
             local target,previous,delta,inbound,distance,deadline
             local function measure()
@@ -5835,14 +5840,14 @@ function Policy.movement(input,Config,Field,RouteMath)
         local profile=type(input.defenseProfile)=="table" and input.defenseProfile or {}
         local bias=clamp(finite(profile.depthBiasYards) and profile.depthBiasYards or 0,0,2.5)*yd
         -- Give the receiver room for the opening .8 seconds. Then walk the
-        -- desired trail toward .75 yards by 2.3 seconds, so a late deep throw
-        -- does not inherit the full four-yard opening cushion indefinitely.
+        -- desired trail toward .75 yards by 2.3 seconds. The opening walking
+        -- target is two yards shallow, with a one-to-three-yard free band.
         local geometricOpening=clamp(((goal-observed.Z)/yd-8)/8,0,1)
         local opening=geometricOpening
         if phase=="Live" and finite(input.elapsed) then
             opening=math.min(opening,clamp((2.3-input.elapsed)/1.5,0,1))
         end
-        local preferred=(-.75-3.25*opening)*yd+bias
+        local preferred=(-.75-1.25*opening)*yd+bias
         local minDepth=preferred-(.75+.25*opening)*yd
         local maxDepth=preferred+(1.25-.25*opening)*yd
         -- Moving the desired walking target is not a new sprint emergency.
@@ -5966,7 +5971,7 @@ return function(ctx,Policy,services)
     local api={}
     local function log(kind,data)
         if type(append)~="function" then return end
-        data=data or {};data.kind=kind;data.time=world:GetServerTimeNow();data.version="2.44"
+        data=data or {};data.kind=kind;data.time=world:GetServerTimeNow();data.version="2.45"
         pcall(function() append("ciu_fullplay_events.jsonl",http:JSONEncode(data)..string.char(10)) end)
     end
     local function pauseReason(s)
@@ -7175,4 +7180,4 @@ if type(writefile)=="function" then
         end
     end)
 end
-print("Chalk Assist 2.44 loaded. Full Auto preserves defensive stamina and varies legal routes. Idle protection runs automatically. Drag / minimize / Right Shift hide. V assist / B all / F8 unload.")
+print("Chalk Assist 2.45 loaded. Full Auto preserves defensive stamina and varies legal routes. Idle protection runs automatically. Drag / minimize / Right Shift hide. V assist / B all / F8 unload.")

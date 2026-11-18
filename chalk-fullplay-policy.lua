@@ -758,7 +758,12 @@ function Policy.movement(input,Config,Field,RouteMath)
             and #plan.Points>=3 and type(plan.Times)=="table" then
             local index=clamp(finite(input.routeWaypoint) and math.floor(input.routeWaypoint) or 2,2,#plan.Points)
             local slowStem=input.slowStem==true and finite(input.slowStemTime)
-            local finalSprint=slowStem and input.finalSprintCommitted==true
+            -- The native throw clock keeps running through a jam or detour.
+            -- At the selected cut time, take the final diagonal from here;
+            -- walking to a missed stem waypoint spends the catch window.
+            -- This starts no earlier than the route's budgeted sprint time.
+            local finalSprint=slowStem and (input.finalSprintCommitted==true
+                or input.elapsed>=input.slowStemTime)
             if finalSprint then index=math.max(3,index) end
             local target,previous,delta,inbound,distance,deadline
             local function measure()
@@ -823,14 +828,14 @@ function Policy.movement(input,Config,Field,RouteMath)
         local profile=type(input.defenseProfile)=="table" and input.defenseProfile or {}
         local bias=clamp(finite(profile.depthBiasYards) and profile.depthBiasYards or 0,0,2.5)*yd
         -- Give the receiver room for the opening .8 seconds. Then walk the
-        -- desired trail toward .75 yards by 2.3 seconds, so a late deep throw
-        -- does not inherit the full four-yard opening cushion indefinitely.
+        -- desired trail toward .75 yards by 2.3 seconds. The opening walking
+        -- target is two yards shallow, with a one-to-three-yard free band.
         local geometricOpening=clamp(((goal-observed.Z)/yd-8)/8,0,1)
         local opening=geometricOpening
         if phase=="Live" and finite(input.elapsed) then
             opening=math.min(opening,clamp((2.3-input.elapsed)/1.5,0,1))
         end
-        local preferred=(-.75-3.25*opening)*yd+bias
+        local preferred=(-.75-1.25*opening)*yd+bias
         local minDepth=preferred-(.75+.25*opening)*yd
         local maxDepth=preferred+(1.25-.25*opening)*yd
         -- Moving the desired walking target is not a new sprint emergency.
